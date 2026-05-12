@@ -345,6 +345,30 @@ fn recovery_trailing_dot_member_access() {
 }
 
 #[test]
+fn recovery_trailing_open_bracket_index() {
+    let src = "x = foo[";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let index = find_node(&r.syntax(), SyntaxKind::IndexExpr).expect("IndexExpr present");
+    // The error placeholder should be a direct child so analyzer
+    // visitors keying on the expected child kind see a slot.
+    assert!(
+        find_node(&index, SyntaxKind::ErrorNode).is_some(),
+        "ErrorNode missing from {}",
+        index.text()
+    );
+
+    let messages: Vec<&str> = r.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 1, "diagnostics: {:?}", messages);
+    assert!(
+        messages[0].contains("index expression"),
+        "got: {:?}",
+        messages
+    );
+}
+
+#[test]
 fn recovery_trailing_question_dot_member_access() {
     let src = "x = foo?.";
     let r = parse(src);

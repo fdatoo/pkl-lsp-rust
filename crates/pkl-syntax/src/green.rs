@@ -942,9 +942,7 @@ impl<'src> Parser<'src> {
                     self.finish_node();
                 }
                 SyntaxKind::LBracket => {
-                    self.bump();
-                    self.parse_expr();
-                    self.expect(SyntaxKind::RBracket, "closing `]`");
+                    self.parse_index_tail();
                     self.start_node_at(cp, SyntaxKind::IndexExpr);
                     self.finish_node();
                 }
@@ -962,6 +960,23 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
+    }
+
+    /// Parse the `[ expr ]` tail of an index expression with recovery.
+    /// On `foo[<EOF>` emits a single "expected index expression"
+    /// diagnostic and an `ErrorNode` placeholder rather than the
+    /// cascading "expected expression" + "expected closing `]`" pair.
+    fn parse_index_tail(&mut self) {
+        self.bump(); // [
+        if self.at(SyntaxKind::RBracket) || self.at_eof() {
+            let span = self.peek_span();
+            self.error(span, "expected index expression after `[`");
+            self.start_node(SyntaxKind::ErrorNode);
+            self.finish_node();
+        } else {
+            self.parse_expr();
+        }
+        self.expect(SyntaxKind::RBracket, "closing `]`");
     }
 
     fn parse_arg_list(&mut self) {
