@@ -1,6 +1,8 @@
 //! End-to-end analyzer benchmarks: parse + resolve + infer.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 const SMALL: &str = r#"
 module acme.config
