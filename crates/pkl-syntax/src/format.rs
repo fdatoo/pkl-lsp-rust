@@ -1139,4 +1139,21 @@ mod tests {
         let out = format_str(src);
         assert!(out.contains("/// my prop"), "{out}");
     }
+
+    #[test]
+    fn formats_interpolated_string() {
+        // Single-line interpolation should be re-emitted verbatim around
+        // the hole, with the inner expression canonically formatted.
+        let src = "name: String = \"hi \\(first +last)!\"\n";
+        let out = format_str(src);
+        // The formatter normalises `first +last` to `first + last`.
+        assert_eq!(out, "name: String = \"hi \\(first + last)!\"\n");
+    }
+
+    #[test]
+    fn formats_interpolated_string_with_nested_string() {
+        let src = "x = \"a\\(\"b\")c\"\n";
+        let out = format_str(src);
+        assert_eq!(out, "x = \"a\\(\"b\")c\"\n");
+    }
 }
