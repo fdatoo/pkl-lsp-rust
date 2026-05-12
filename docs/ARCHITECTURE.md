@@ -41,7 +41,14 @@ is materialized off it on every parse.
 * `lexer.rs` is a hand-rolled byte-streaming lexer with `unicode-ident`
   for XID classification. It produces a flat `Vec<Token>` and preserves
   trivia (whitespace, comments) so the layer above can decide what to
-  ignore.
+  ignore. Strings carrying `\(expr)` interpolation drive a small
+  mode-stack (`Normal` / `String { hashes, multiline }` /
+  `Interpolation { paren_depth }`) so the lexer can re-enter normal Pkl
+  tokenisation inside each hole; strings without interpolation stay on
+  the single-token path. Each interpolated literal is emitted as
+  `StringQuoteOpen` / alternating `StringPart` (or
+  `MultilineStringPart`) + `InterpolationStart` ... `InterpolationEnd`
+  pairs / `StringQuoteClose`.
 * `green.rs` is the parser. It drives a `rowan::GreenNodeBuilder` over
   the lexer's token stream and produces a red-green syntax tree in
   which every byte of the original source (trivia included) is
@@ -54,7 +61,10 @@ is materialized off it on every parse.
   `doc_comment_for(node)` which recovers `///` comments out of the
   declaration's leading trivia (descending through wrapper nodes like
   `ModifierList` so doc comments still attach when modifiers are
-  present).
+  present). The `InterpolatedString` wrapper exposes `parts()` and
+  `interpolations()` iterators so analyzer/formatter passes can walk
+  the literal-text runs and the `\(...)` holes uniformly across
+  single-line, multi-line, and custom-delimited (`#"..."#`) flavours.
 * `parser.rs` exposes the public `parse(src) -> ParseResult` entry
   point. `ParseResult` carries the immutable `GreenNode` (so the
   result can live in `Send + Sync` shared state) plus any diagnostics.

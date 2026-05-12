@@ -20,11 +20,34 @@ pub enum SyntaxKind {
     HexNumber,
     BinNumber,
     OctNumber,
-    /// A single-line string literal, including its quotes. Interpolation is
-    /// not yet split out at the token level.
+    /// A single-line string literal, including its quotes. Used only when the
+    /// string contains no interpolation; an interpolated string is decomposed
+    /// into [`StringQuoteOpen`], [`StringPart`], [`Interpolation`] nodes, and
+    /// [`StringQuoteClose`] tokens under an [`InterpolatedString`] node.
     String,
-    /// A multi-line `"""..."""` string literal.
+    /// A multi-line `"""..."""` string literal. As with [`String`], this is
+    /// emitted only when there is no interpolation; otherwise the string is
+    /// decomposed into [`InterpolatedMultilineString`] components.
     MultilineString,
+    /// Opening quote token of an interpolated string (a single `"`, `"""`,
+    /// or one of the `#"...`-style custom-delimited variants). The exact
+    /// text identifies the flavour and hash count of the string.
+    StringQuoteOpen,
+    /// Closing quote token of an interpolated string, matching the opening
+    /// flavour.
+    StringQuoteClose,
+    /// The literal-text run between escapes/interpolations in an
+    /// interpolated single-line string.
+    StringPart,
+    /// The literal-text run between escapes/interpolations in an
+    /// interpolated multi-line string.
+    MultilineStringPart,
+    /// Opening marker of an interpolation hole: `\(`, or `#\(`/`##\(`/...
+    /// for custom-delimited strings.
+    InterpolationStart,
+    /// Closing marker of an interpolation hole: `)`, or `)#`/`)##`/... for
+    /// custom-delimited strings.
+    InterpolationEnd,
 
     // Identifier and keywords ----------------------------------------------
     Ident,
@@ -189,7 +212,21 @@ pub enum SyntaxKind {
     TraceExpr,
     SuperAccessExpr,
     SuperSubscriptExpr,
+    /// Node wrapping a single-line interpolated string. Children are a
+    /// `StringQuoteOpen`, alternating `StringPart`/`Interpolation` children,
+    /// then a `StringQuoteClose`. Used for both bare `"..."` and
+    /// custom-delimited `#"..."#` flavours; the opening token's text
+    /// identifies which.
     InterpolatedString,
+    /// Node wrapping a multi-line interpolated string (triple-quoted).
+    /// Layout mirrors [`InterpolatedString`] but with `MultilineStringPart`
+    /// runs in place of `StringPart`.
+    InterpolatedMultilineString,
+    /// Node wrapping a single `\(expr)` interpolation hole inside an
+    /// interpolated string. Children are `InterpolationStart`, an `Expr`,
+    /// and `InterpolationEnd` (the closing marker may be omitted on
+    /// recovery).
+    Interpolation,
 
     ArgList,
 

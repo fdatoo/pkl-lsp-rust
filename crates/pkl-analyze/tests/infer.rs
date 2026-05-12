@@ -493,3 +493,28 @@ fn lambda_has_function_type() {
         other => panic!("expected function, got {:?}", other),
     }
 }
+
+#[test]
+fn interpolated_string_has_string_type() {
+    // A literal `"a\(1)"` should infer as `String`.
+    let src = "x = \"a\\(1)\"\n";
+    let a = analyze_clean(src);
+    let ty = a
+        .inference
+        .type_of(offset_of(src, "\"a\\(1)\""))
+        .expect("interpolated string has a recorded type");
+    assert_eq!(ty, &Ty::Str);
+}
+
+#[test]
+fn interpolation_inner_expression_is_typed() {
+    // The inner `1 + 2` of `"\(1 + 2)"` should be typed as Int even though
+    // it sits inside an interpolation hole.
+    let src = "x = \"value=\\(1 + 2)\"\n";
+    let a = analyze_clean(src);
+    let ty = a
+        .inference
+        .type_of(offset_of(src, "1 + 2"))
+        .expect("inner expr has a recorded type");
+    assert_eq!(ty, &Ty::Int);
+}

@@ -901,6 +901,7 @@ impl TypeArgumentList {
 #[derive(Clone, Debug)]
 pub enum Expr {
     Literal(LiteralExpr),
+    InterpolatedString(InterpolatedString),
     Ident(IdentExpr),
     Paren(ParenExpr),
     Unary(UnaryExpr),
@@ -928,6 +929,8 @@ impl AstNode for Expr {
         matches!(
             kind,
             SyntaxKind::LiteralExpr
+                | SyntaxKind::InterpolatedString
+                | SyntaxKind::InterpolatedMultilineString
                 | SyntaxKind::IdentExpr
                 | SyntaxKind::ParenExpr
                 | SyntaxKind::UnaryExpr
@@ -953,6 +956,9 @@ impl AstNode for Expr {
     fn cast(syntax: SyntaxNode) -> Option<Self> {
         Some(match syntax.kind() {
             SyntaxKind::LiteralExpr => Expr::Literal(LiteralExpr(syntax)),
+            SyntaxKind::InterpolatedString | SyntaxKind::InterpolatedMultilineString => {
+                Expr::InterpolatedString(InterpolatedString(syntax))
+            }
             SyntaxKind::IdentExpr => Expr::Ident(IdentExpr(syntax)),
             SyntaxKind::ParenExpr => Expr::Paren(ParenExpr(syntax)),
             SyntaxKind::UnaryExpr => Expr::Unary(UnaryExpr(syntax)),
@@ -979,6 +985,7 @@ impl AstNode for Expr {
     fn syntax(&self) -> &SyntaxNode {
         match self {
             Expr::Literal(e) => e.syntax(),
+            Expr::InterpolatedString(e) => e.syntax(),
             Expr::Ident(e) => e.syntax(),
             Expr::Paren(e) => e.syntax(),
             Expr::Unary(e) => e.syntax(),
@@ -1004,6 +1011,99 @@ impl AstNode for Expr {
 }
 
 ast_node!(LiteralExpr, SyntaxKind::LiteralExpr);
+
+/// A `"..."` or `"""..."""` (or `#"..."#`, ...) literal that contains at
+/// least one `\(...)` interpolation hole. Strings without any interpolation
+/// stay on the simpler `LiteralExpr` path so existing tooling doesn't have
+/// to grow new cases for the common literal-only shape.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InterpolatedString(pub(crate) SyntaxNode);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InterpolatedStringKind {
+    /// Single-line `"..."` (or `#"..."#`).
+    SingleLine,
+    /// Multi-line `"""..."""` (or `#"""..."""#`).
+    Multiline,
+}
+
+impl AstNode for InterpolatedString {
+    #[inline]
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::InterpolatedString | SyntaxKind::InterpolatedMultilineString
+        )
+    }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) {
+            Some(Self(syntax))
+        } else {
+            None
+        }
+    }
+    #[inline]
+    fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+impl InterpolatedString {
+    pub fn kind(&self) -> InterpolatedStringKind {
+        match self.0.kind() {
+            SyntaxKind::InterpolatedMultilineString => InterpolatedStringKind::Multiline,
+            _ => InterpolatedStringKind::SingleLine,
+        }
+    }
+
+    /// The opening `"` / `"""` / `#"...` quote token.
+    pub fn open_quote(&self) -> Option<SyntaxToken> {
+        child_token(&self.0, SyntaxKind::StringQuoteOpen)
+    }
+
+    /// The closing quote token, if the literal was terminated.
+    pub fn close_quote(&self) -> Option<SyntaxToken> {
+        child_token(&self.0, SyntaxKind::StringQuoteClose)
+    }
+
+    /// Iterate over the literal-text `StringPart` / `MultilineStringPart`
+    /// children, in source order.
+    pub fn parts(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.0
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .filter(|t| {
+                matches!(
+                    t.kind(),
+                    SyntaxKind::StringPart | SyntaxKind::MultilineStringPart
+                )
+            })
+    }
+
+    /// Iterate over the interpolation holes in source order.
+    pub fn interpolations(&self) -> impl Iterator<Item = Interpolation> + '_ {
+        self.0.children().filter_map(Interpolation::cast)
+    }
+}
+
+ast_node!(Interpolation, SyntaxKind::Interpolation);
+
+impl Interpolation {
+    /// The opening `\(` (or `#\(` / `##\(` / ...) marker.
+    pub fn open_marker(&self) -> Option<SyntaxToken> {
+        child_token(&self.0, SyntaxKind::InterpolationStart)
+    }
+
+    /// The closing `)` (or `)#` / ...) marker, if present.
+    pub fn close_marker(&self) -> Option<SyntaxToken> {
+        child_token(&self.0, SyntaxKind::InterpolationEnd)
+    }
+
+    /// The expression sitting inside the `\(...)` hole.
+    pub fn expr(&self) -> Option<Expr> {
+        child_node(&self.0)
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LiteralKind {
@@ -1684,5 +1784,35 @@ mod tests {
         let m = Module::cast(parsed.syntax.clone()).unwrap();
         assert_eq!(m.text(), src);
         assert_eq!(m.span(), Span::new(0, src.len() as u32));
+    }
+
+    #[test]
+    fn interpolated_string_exposes_parts_and_holes() {
+        let m = parse("x = \"a\\(name)b\\(x + y)c\"\n");
+        let prop = match m.items().next().unwrap() {
+            Item::Property(p) => p,
+            _ => panic!("expected property"),
+        };
+        let value = match prop.value() {
+            Some(PropertyValue::Expr(e)) => e,
+            _ => panic!("expected expression value"),
+        };
+        let s = match value {
+            Expr::InterpolatedString(s) => s,
+            other => panic!("expected interpolated string, got {:?}", other),
+        };
+        assert_eq!(s.kind(), InterpolatedStringKind::SingleLine);
+        assert!(s.open_quote().is_some());
+        assert!(s.close_quote().is_some());
+        let parts: Vec<String> = s.parts().map(|t| t.text().to_owned()).collect();
+        assert_eq!(parts, vec!["a", "b", "c"]);
+        let holes: Vec<_> = s.interpolations().collect();
+        assert_eq!(holes.len(), 2);
+        // First hole resolves to `name` (an IdentExpr).
+        let first_expr = holes[0].expr().expect("first interpolation expr");
+        assert!(matches!(first_expr, Expr::Ident(_)));
+        // Second is a binary expr.
+        let second_expr = holes[1].expr().expect("second interpolation expr");
+        assert!(matches!(second_expr, Expr::Binary(_)));
     }
 }

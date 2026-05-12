@@ -622,6 +622,7 @@ fn write_spread(out: &mut String, s: &ObjectSpread, ctx: FmtCtx) {
 fn write_expr(out: &mut String, expr: &Expr, ctx: FmtCtx) {
     match expr {
         Expr::Literal(lit) => write_literal(out, lit),
+        Expr::InterpolatedString(s) => write_interpolated_string(out, s, ctx),
         Expr::Ident(id) => write_ident_expr(out, id),
         Expr::Paren(p) => write_paren(out, p, ctx),
         Expr::Unary(u) => write_unary(out, u, ctx),
@@ -642,6 +643,46 @@ fn write_expr(out: &mut String, expr: &Expr, ctx: FmtCtx) {
         Expr::Trace(t) => write_trace(out, t, ctx),
         Expr::Read(r) => write_read(out, r, ctx),
         Expr::Error(_) => out.push_str("<error>"),
+    }
+}
+
+fn write_interpolated_string(out: &mut String, s: &cst::InterpolatedString, ctx: FmtCtx) {
+    use rowan::NodeOrToken;
+
+    // Emit the opening quote.
+    if let Some(open) = s.open_quote() {
+        out.push_str(open.text());
+    }
+    // Walk children in source order, emitting parts verbatim and recursing
+    // into each interpolation hole so the inner expression gets canonical
+    // formatting (with the surrounding `\(` ... `)` markers preserved as
+    // raw text from the source).
+    for el in s.syntax().children_with_tokens() {
+        match el {
+            NodeOrToken::Token(t) => match t.kind() {
+                SyntaxKind::StringPart | SyntaxKind::MultilineStringPart => {
+                    out.push_str(t.text());
+                }
+                // Open/close quotes are emitted explicitly.
+                _ => {}
+            },
+            NodeOrToken::Node(n) => {
+                if let Some(hole) = cst::Interpolation::cast(n) {
+                    if let Some(open) = hole.open_marker() {
+                        out.push_str(open.text());
+                    }
+                    if let Some(inner) = hole.expr() {
+                        write_expr(out, &inner, ctx);
+                    }
+                    if let Some(close) = hole.close_marker() {
+                        out.push_str(close.text());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(close) = s.close_quote() {
+        out.push_str(close.text());
     }
 }
 
@@ -1097,5 +1138,36 @@ mod tests {
         let src = "/// my prop\nfoo: Int = 1\n";
         let out = format_str(src);
         assert!(out.contains("/// my prop"), "{out}");
+    }
+
+    #[test]
+    fn formats_interpolated_string() {
+        // Single-line interpolation should be re-emitted verbatim around
+        // the hole, with the inner expression canonically formatted.
+        let src = "name: String = \"hi \\(first +last)!\"\n";
+        let out = format_str(src);
+        // The formatter normalises `first +last` to `first + last`.
+        assert_eq!(out, "name: String = \"hi \\(first + last)!\"\n");
+    }
+
+    #[test]
+    fn formats_interpolated_string_with_nested_string() {
+        let src = "x = \"a\\(\"b\")c\"\n";
+        let out = format_str(src);
+        assert_eq!(out, "x = \"a\\(\"b\")c\"\n");
+    }
+
+    #[test]
+    fn formats_interpolated_multiline_string() {
+        let src = "x = \"\"\"\nhello \\(name)\nworld\n\"\"\"\n";
+        let out = format_str(src);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn formats_custom_delim_interpolated_string() {
+        let src = "x = #\"hello \\#(name)!\"#\n";
+        let out = format_str(src);
+        assert_eq!(out, src);
     }
 }
