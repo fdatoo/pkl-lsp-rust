@@ -380,7 +380,15 @@ impl LanguageServer for Backend {
         let Some(doc) = self.documents.get(&uri) else {
             return Ok(None);
         };
-        Ok(rename_at(&uri, &doc, position, new_name))
+        let graph = self.graph.read().await;
+        Ok(rename_at(
+            &uri,
+            &doc,
+            &self.documents,
+            &graph,
+            position,
+            new_name,
+        ))
     }
 
     async fn document_highlight(
