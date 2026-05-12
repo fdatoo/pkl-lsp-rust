@@ -5,14 +5,20 @@
 //! newlines, comments) is emitted as its own tokens so the parser can choose
 //! to skip or preserve them for tools like a formatter.
 //!
-//! Notes on intentional scope of this initial implementation:
+//! Strings are handled in two modes:
 //!
-//! * Pkl string interpolation (`"\(expr)"`) is not yet re-entered: the entire
-//!   `"..."` is emitted as a single `String` token whose interior is parsed
-//!   later. The same applies to multi-line strings and custom-delimited
-//!   strings (`#"..."#`).
-//! * The lexer does not yet validate the textual content of numbers beyond
-//!   their shape; the parser/analyzer is responsible for converting them.
+//! * **Non-interpolated** strings (no `\(` at the appropriate hash level)
+//!   are still emitted as a single [`SyntaxKind::String`] /
+//!   [`SyntaxKind::MultilineString`] token. This keeps the token shape stable
+//!   for downstream consumers that don't care about interpolation.
+//! * **Interpolated** strings are decomposed: the lexer pushes a `String`
+//!   mode and emits a [`SyntaxKind::StringQuoteOpen`] / `StringPart` /
+//!   [`SyntaxKind::InterpolationStart`] / ... / [`SyntaxKind::InterpolationEnd`] /
+//!   [`SyntaxKind::StringQuoteClose`] sequence. Inside an `InterpolationStart`
+//!   ... `InterpolationEnd` region the lexer pushes an `Interpolation` mode
+//!   that lexes normal Pkl tokens, tracking paren depth so a `)` only closes
+//!   the hole when it's at depth zero (and, for custom-delimited strings,
+//!   followed by the right number of `#` characters).
 
 use crate::kind::{keyword_from_ident, SyntaxKind};
 use crate::span::Span;
@@ -23,6 +29,29 @@ pub struct Lexer<'src> {
     src: &'src str,
     bytes: &'src [u8],
     pos: usize,
+    modes: Vec<Mode>,
+}
+
+/// Top-of-stack mode determines what `next_token` does. The lexer starts in
+/// `Normal` and pushes / pops these on string/interpolation boundaries.
+#[derive(Copy, Clone, Debug)]
+enum Mode {
+    /// Default Pkl token stream.
+    Normal,
+    /// Inside a string literal. We have already emitted the opening quote
+    /// token and are now scanning string parts and interpolation markers.
+    String {
+        /// Number of leading `#` characters on the delimiter, or zero for
+        /// the bare `"..."` / `"""..."""` forms.
+        hashes: u32,
+        /// True for triple-quoted multi-line strings.
+        multiline: bool,
+    },
+    /// Inside an `\(...)` interpolation hole. We lex normal Pkl tokens but
+    /// track paren depth so that a top-level `)` (matched to the right
+    /// number of `#` characters for custom-delimited strings) ends the
+    /// hole and pops back to the surrounding `String` mode.
+    Interpolation { hashes: u32, paren_depth: u32 },
 }
 
 impl<'src> Lexer<'src> {
@@ -31,6 +60,7 @@ impl<'src> Lexer<'src> {
             src,
             bytes: src.as_bytes(),
             pos: 0,
+            modes: vec![Mode::Normal],
         }
     }
 
@@ -52,6 +82,14 @@ impl<'src> Lexer<'src> {
         if self.pos > self.src.len() {
             return None;
         }
+
+        // String mode: scan a StringPart / interpolation marker / closing
+        // quote. Handle this before the EOF sentinel so an unterminated
+        // string still reports the partial part.
+        if let Some(&Mode::String { hashes, multiline }) = self.modes.last() {
+            return self.next_in_string(hashes, multiline);
+        }
+
         if self.pos == self.src.len() {
             let span = Span::new(self.pos as u32, self.pos as u32);
             self.pos += 1; // step past so subsequent calls return None
@@ -77,13 +115,13 @@ impl<'src> Lexer<'src> {
             },
             // Custom-delimited strings `#"..."#`, `##"..."##`, etc.
             b'#' if matches!(self.peek_byte(1), Some(b'#') | Some(b'"')) => {
-                self.lex_custom_string()
+                return Some(self.lex_custom_string_open(start));
             }
             b'"' => {
                 if self.starts_with(b"\"\"\"") {
-                    self.lex_multiline_string()
+                    return Some(self.lex_multiline_string_open(start));
                 } else {
-                    self.lex_string()
+                    return Some(self.lex_string_open(start));
                 }
             }
             b'`' => self.lex_quoted_ident(),
@@ -125,6 +163,15 @@ impl<'src> Lexer<'src> {
         self.bytes
             .get(self.pos..self.pos + needle.len())
             .is_some_and(|s| s == needle)
+    }
+
+    /// Count how many consecutive `#` bytes appear at `self.pos + offset`.
+    fn count_hashes_at(&self, offset: usize) -> usize {
+        let mut n = 0usize;
+        while matches!(self.peek_byte(offset + n), Some(b'#')) {
+            n += 1;
+        }
+        n
     }
 
     /// Number of bytes occupied by the UTF-8 character at `self.pos`.
@@ -196,9 +243,126 @@ impl<'src> Lexer<'src> {
         SyntaxKind::BlockComment
     }
 
-    fn lex_string(&mut self) -> SyntaxKind {
-        // self.bytes[self.pos] == '"'
-        self.pos += 1;
+    /// True if there is an unescaped `\(...)` interpolation hole in the
+    /// single-line string starting at `start` (which is the position of the
+    /// opening `"`). The scan stops at the first newline or closing `"`. Used
+    /// to decide whether to emit the whole string as a single token or to
+    /// decompose it.
+    ///
+    /// `hashes == 0` for the bare `"..."` form; for `#"..."#` and friends
+    /// the caller has already consumed the leading `#`s and `start` is at
+    /// the `"`.
+    fn single_line_has_interpolation(&self, start: usize, hashes: usize) -> bool {
+        let bytes = self.bytes;
+        let mut i = start + 1; // past opening "
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    if string_close_matches(bytes, i, hashes) {
+                        return false;
+                    }
+                    i += 1;
+                }
+                b'\n' => return false,
+                b'\\' => {
+                    if hashes == 0 {
+                        // Plain `"..."`: `\(` always starts a hole.
+                        if matches!(bytes.get(i + 1), Some(b'(')) {
+                            return true;
+                        }
+                        // Skip the escape's source bytes.
+                        if i + 1 < bytes.len() {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        // `#"..."#`: `\` is literal unless followed by N `#`s
+                        // then a metacharacter. `\<N hashes>(` opens a hole.
+                        if bytes.get(i + 1..i + 1 + hashes) == Some(&vec![b'#'; hashes][..])
+                            && matches!(bytes.get(i + 1 + hashes), Some(b'('))
+                        {
+                            return true;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    fn multiline_has_interpolation(&self, start: usize, hashes: usize) -> bool {
+        let bytes = self.bytes;
+        let mut i = start + 3; // past opening """
+        while i < bytes.len() {
+            if i + 3 <= bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+                if multiline_close_matches(bytes, i, hashes) {
+                    return false;
+                }
+                i += 1;
+                continue;
+            }
+            match bytes[i] {
+                b'\\' => {
+                    if hashes == 0 {
+                        if matches!(bytes.get(i + 1), Some(b'(')) {
+                            return true;
+                        }
+                        if i + 1 < bytes.len() {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        if bytes.get(i + 1..i + 1 + hashes) == Some(&vec![b'#'; hashes][..])
+                            && matches!(bytes.get(i + 1 + hashes), Some(b'('))
+                        {
+                            return true;
+                        }
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    /// Open a plain `"..."` string. Either emits it as a single
+    /// [`SyntaxKind::String`] token (legacy path for strings without
+    /// interpolation) or emits the opening quote and pushes a `String`
+    /// mode so subsequent calls return the parts and the interpolation
+    /// markers.
+    fn lex_string_open(&mut self, start: usize) -> Token<'src> {
+        debug_assert_eq!(self.bytes[start], b'"');
+        if self.single_line_has_interpolation(start, 0) {
+            // Emit just the opening quote and switch to String mode.
+            self.pos = start + 1;
+            self.modes.push(Mode::String {
+                hashes: 0,
+                multiline: false,
+            });
+            let span = Span::new(start as u32, self.pos as u32);
+            return Token::new(
+                SyntaxKind::StringQuoteOpen,
+                span,
+                &self.src[start..self.pos],
+            );
+        }
+        // Legacy single-token path: behave exactly as before, including
+        // recovery to a newline on unterminated strings.
+        self.pos = start + 1;
+        let kind = self.lex_string_body();
+        let span = Span::new(start as u32, self.pos as u32);
+        Token::new(kind, span, &self.src[start..self.pos])
+    }
+
+    /// Body-scan loop for a non-interpolated single-line string. Caller has
+    /// already advanced past the opening `"`. Returns the closing kind
+    /// (`String` on success or `Error` on unterminated input).
+    fn lex_string_body(&mut self) -> SyntaxKind {
         while let Some(b) = self.peek_byte(0) {
             match b {
                 b'"' => {
@@ -206,31 +370,43 @@ impl<'src> Lexer<'src> {
                     return SyntaxKind::String;
                 }
                 b'\\' => {
-                    // Skip the escape's source bytes; we don't decode here.
-                    // Handles \n, \t, \", \\, \( (interpolation start), etc.
                     self.pos += 1;
                     if self.pos < self.bytes.len() {
                         self.pos += self.utf8_char_len();
                     }
                 }
-                b'\n' => {
-                    // Unterminated single-line string; stop at the newline.
-                    return SyntaxKind::Error;
-                }
+                b'\n' => return SyntaxKind::Error,
                 _ => self.pos += self.utf8_char_len(),
             }
         }
         SyntaxKind::Error
     }
 
-    fn lex_multiline_string(&mut self) -> SyntaxKind {
-        // self.bytes[self.pos..self.pos+3] == b"\"\"\""
-        self.pos += 3;
+    fn lex_multiline_string_open(&mut self, start: usize) -> Token<'src> {
+        debug_assert!(self.bytes[start..].starts_with(b"\"\"\""));
+        if self.multiline_has_interpolation(start, 0) {
+            self.pos = start + 3;
+            self.modes.push(Mode::String {
+                hashes: 0,
+                multiline: true,
+            });
+            let span = Span::new(start as u32, self.pos as u32);
+            return Token::new(
+                SyntaxKind::StringQuoteOpen,
+                span,
+                &self.src[start..self.pos],
+            );
+        }
+        self.pos = start + 3;
+        let kind = self.lex_multiline_string_body();
+        let span = Span::new(start as u32, self.pos as u32);
+        Token::new(kind, span, &self.src[start..self.pos])
+    }
+
+    fn lex_multiline_string_body(&mut self) -> SyntaxKind {
         while self.pos < self.bytes.len() {
             if self.starts_with(b"\"\"\"") {
                 self.pos += 3;
-                // Pkl allows additional `"` after the closing triple in some
-                // contexts; we leave that to the parser.
                 return SyntaxKind::MultilineString;
             }
             match self.peek_byte(0).unwrap() {
@@ -248,51 +424,207 @@ impl<'src> Lexer<'src> {
 
     /// Handle `#"..."#`, `##"..."##`, etc. The number of `#` on the opening
     /// must match the closing fence.
-    fn lex_custom_string(&mut self) -> SyntaxKind {
+    fn lex_custom_string_open(&mut self, start: usize) -> Token<'src> {
+        // Count leading hashes.
         let mut hashes = 0usize;
         while matches!(self.peek_byte(hashes), Some(b'#')) {
             hashes += 1;
         }
         if !matches!(self.peek_byte(hashes), Some(b'"')) {
-            // Lone `#` — treat as error (Pkl has no `#` operator at the
-            // token level outside of custom strings).
+            // Lone `#` — treat as error (Pkl has no `#` operator outside of
+            // custom strings).
             self.pos += hashes;
-            return SyntaxKind::Error;
+            let span = Span::new(start as u32, self.pos as u32);
+            return Token::new(SyntaxKind::Error, span, &self.src[start..self.pos]);
         }
-        self.pos += hashes;
-        let triple = self.starts_with(b"\"\"\"");
+        let quote_pos = start + hashes;
+        let triple = self.bytes[quote_pos..].starts_with(b"\"\"\"");
         if triple {
-            self.pos += 3;
-            let close_needle: Vec<u8> = b"\"\"\""
-                .iter()
-                .copied()
-                .chain(std::iter::repeat_n(b'#', hashes))
-                .collect();
-            while self.pos < self.bytes.len() {
-                if self.bytes[self.pos..].starts_with(&close_needle) {
-                    self.pos += close_needle.len();
-                    return SyntaxKind::MultilineString;
-                }
-                self.pos += self.utf8_char_len();
+            if self.multiline_has_interpolation(quote_pos, hashes) {
+                self.pos = quote_pos + 3;
+                self.modes.push(Mode::String {
+                    hashes: hashes as u32,
+                    multiline: true,
+                });
+                let span = Span::new(start as u32, self.pos as u32);
+                return Token::new(
+                    SyntaxKind::StringQuoteOpen,
+                    span,
+                    &self.src[start..self.pos],
+                );
             }
-            SyntaxKind::Error
+            // Legacy single-token: scan until matching `"""` + N hashes.
+            self.pos = quote_pos + 3;
+            let kind = self.lex_custom_multiline_body(hashes);
+            let span = Span::new(start as u32, self.pos as u32);
+            Token::new(kind, span, &self.src[start..self.pos])
         } else {
-            self.pos += 1; // opening "
-            let close_needle: Vec<u8> = std::iter::once(b'"')
-                .chain(std::iter::repeat_n(b'#', hashes))
-                .collect();
-            while self.pos < self.bytes.len() {
-                if self.bytes[self.pos..].starts_with(&close_needle) {
-                    self.pos += close_needle.len();
-                    return SyntaxKind::String;
-                }
-                if self.bytes[self.pos] == b'\n' {
-                    return SyntaxKind::Error;
-                }
-                self.pos += self.utf8_char_len();
+            if self.single_line_has_interpolation(quote_pos, hashes) {
+                self.pos = quote_pos + 1;
+                self.modes.push(Mode::String {
+                    hashes: hashes as u32,
+                    multiline: false,
+                });
+                let span = Span::new(start as u32, self.pos as u32);
+                return Token::new(
+                    SyntaxKind::StringQuoteOpen,
+                    span,
+                    &self.src[start..self.pos],
+                );
             }
-            SyntaxKind::Error
+            self.pos = quote_pos + 1;
+            let kind = self.lex_custom_single_body(hashes);
+            let span = Span::new(start as u32, self.pos as u32);
+            Token::new(kind, span, &self.src[start..self.pos])
         }
+    }
+
+    fn lex_custom_single_body(&mut self, hashes: usize) -> SyntaxKind {
+        while self.pos < self.bytes.len() {
+            if string_close_matches(self.bytes, self.pos, hashes) {
+                self.pos += 1 + hashes;
+                return SyntaxKind::String;
+            }
+            if self.bytes[self.pos] == b'\n' {
+                return SyntaxKind::Error;
+            }
+            self.pos += self.utf8_char_len();
+        }
+        SyntaxKind::Error
+    }
+
+    fn lex_custom_multiline_body(&mut self, hashes: usize) -> SyntaxKind {
+        while self.pos < self.bytes.len() {
+            if multiline_close_matches(self.bytes, self.pos, hashes) {
+                self.pos += 3 + hashes;
+                return SyntaxKind::MultilineString;
+            }
+            self.pos += self.utf8_char_len();
+        }
+        SyntaxKind::Error
+    }
+
+    // ------------------------------------------------------------------
+    // String-mode dispatch
+    //
+    // Once we're inside a `Mode::String { ... }`, every `next_token` call
+    // emits one of:
+    // * `StringPart` / `MultilineStringPart` — literal text between markers,
+    // * `InterpolationStart` — `\(` (or `\<N hashes>(`),
+    // * `StringQuoteClose` — closing `"` (or `"""`, optionally followed by N hashes).
+
+    fn next_in_string(&mut self, hashes: u32, multiline: bool) -> Option<Token<'src>> {
+        let start = self.pos;
+        let hashes = hashes as usize;
+
+        // Check for closing fence first.
+        if multiline {
+            if multiline_close_matches(self.bytes, self.pos, hashes) {
+                self.pos += 3 + hashes;
+                self.modes.pop();
+                let span = Span::new(start as u32, self.pos as u32);
+                return Some(Token::new(
+                    SyntaxKind::StringQuoteClose,
+                    span,
+                    &self.src[start..self.pos],
+                ));
+            }
+        } else if string_close_matches(self.bytes, self.pos, hashes) {
+            self.pos += 1 + hashes;
+            self.modes.pop();
+            let span = Span::new(start as u32, self.pos as u32);
+            return Some(Token::new(
+                SyntaxKind::StringQuoteClose,
+                span,
+                &self.src[start..self.pos],
+            ));
+        }
+
+        // Interpolation start?
+        if interpolation_start_matches(self.bytes, self.pos, hashes) {
+            let len = 2 + hashes; // `\` + N hashes + `(`
+            self.pos += len;
+            self.modes.push(Mode::Interpolation {
+                hashes: hashes as u32,
+                paren_depth: 0,
+            });
+            let span = Span::new(start as u32, self.pos as u32);
+            return Some(Token::new(
+                SyntaxKind::InterpolationStart,
+                span,
+                &self.src[start..self.pos],
+            ));
+        }
+
+        // End of input inside a string — bail out so the parser can recover.
+        if self.pos >= self.bytes.len() {
+            self.modes.pop();
+            let span = Span::new(self.pos as u32, self.pos as u32);
+            self.pos += 1;
+            return Some(Token::new(SyntaxKind::Eof, span, ""));
+        }
+
+        // Otherwise we're inside a literal-text run. Consume up to the next
+        // marker (or, for single-line strings, the end of line which marks
+        // an unterminated string).
+        let part_kind = if multiline {
+            SyntaxKind::MultilineStringPart
+        } else {
+            SyntaxKind::StringPart
+        };
+
+        while self.pos < self.bytes.len() {
+            if multiline {
+                if multiline_close_matches(self.bytes, self.pos, hashes) {
+                    break;
+                }
+            } else if string_close_matches(self.bytes, self.pos, hashes) {
+                break;
+            }
+            if interpolation_start_matches(self.bytes, self.pos, hashes) {
+                break;
+            }
+            let b = self.bytes[self.pos];
+            if !multiline && b == b'\n' {
+                // Unterminated single-line string. Pop the mode and emit a
+                // part covering whatever we've consumed (plus the newline?).
+                // We stop before the newline so the next token is a regular
+                // Newline trivia in Normal mode.
+                self.modes.pop();
+                break;
+            }
+            if b == b'\\' {
+                // Skip the escape. In `#"..."#` strings, `\` is only an
+                // escape when followed by N hashes then a metacharacter; we
+                // already checked that this isn't an `InterpolationStart`
+                // above, so consume the backslash and let the next iteration
+                // handle the rest.
+                if hashes == 0 {
+                    // `\` + next char (or just `\` at end of input).
+                    self.pos += 1;
+                    if self.pos < self.bytes.len() {
+                        self.pos += self.utf8_char_len();
+                    }
+                    continue;
+                } else {
+                    self.pos += 1;
+                    continue;
+                }
+            }
+            self.pos += self.utf8_char_len();
+        }
+
+        if self.pos == start {
+            // We made no progress — this shouldn't happen but emit an Eof to
+            // avoid an infinite loop.
+            self.modes.pop();
+            let span = Span::new(self.pos as u32, self.pos as u32);
+            self.pos += 1;
+            return Some(Token::new(SyntaxKind::Eof, span, ""));
+        }
+
+        let span = Span::new(start as u32, self.pos as u32);
+        Some(Token::new(part_kind, span, &self.src[start..self.pos]))
     }
 
     fn lex_quoted_ident(&mut self) -> SyntaxKind {
@@ -436,7 +768,38 @@ impl<'src> Lexer<'src> {
     /// Attempt to lex a single punctuation token. Returns `None` if the
     /// current byte does not begin any known operator. Always advances `pos`
     /// when it returns `Some`.
+    ///
+    /// This is also responsible for tracking paren depth inside an enclosing
+    /// `Interpolation` mode: `(` bumps depth, `)` at depth>0 decrements,
+    /// `)` at depth==0 (with the right number of trailing `#`s for the
+    /// surrounding custom-delimited string) emits `InterpolationEnd` and
+    /// pops the mode.
     fn try_lex_punct(&mut self) -> Option<SyntaxKind> {
+        // First, look for an `InterpolationEnd` if we're inside a hole and
+        // sitting on a `)` at depth 0.
+        if let Some(&Mode::Interpolation {
+            hashes,
+            paren_depth,
+        }) = self.modes.last()
+        {
+            if paren_depth == 0 && self.peek_byte(0) == Some(b')') {
+                // Need N matching trailing hashes for custom-delimited strings.
+                let hashes = hashes as usize;
+                if hashes == 0 || self.count_hashes_at(1) >= hashes {
+                    let start = self.pos;
+                    self.pos += 1 + hashes;
+                    self.modes.pop();
+                    // After popping, we are back in the surrounding String mode.
+                    let _span = Span::new(start as u32, self.pos as u32);
+                    // We return the kind only; the caller wraps it into a Token
+                    // using the span/text it computed from `self.pos`. To keep
+                    // that caller path simple we set `pos` to the post-token
+                    // position and return the kind.
+                    return Some(SyntaxKind::InterpolationEnd);
+                }
+            }
+        }
+
         let b = self.bytes[self.pos];
         let b1 = self.peek_byte(1);
         let b2 = self.peek_byte(2);
@@ -483,8 +846,67 @@ impl<'src> Lexer<'src> {
             _ => return None,
         };
         self.pos += consume;
+        // Track paren depth for an enclosing Interpolation mode.
+        if let Some(Mode::Interpolation { paren_depth, .. }) = self.modes.last_mut() {
+            match kind {
+                SyntaxKind::LParen => *paren_depth += 1,
+                SyntaxKind::RParen if *paren_depth > 0 => *paren_depth -= 1,
+                _ => {}
+            }
+        }
         Some(kind)
     }
+}
+
+// ----------------------------------------------------------------------
+// String-fence matching helpers (free fns for use both inside and outside
+// the lexer's borrow checker scope).
+
+/// True when `bytes[at..]` starts with a single-line closing fence: `"`
+/// followed by exactly `hashes` `#` characters. Used both for the legacy
+/// scan and for the mode-driven scan.
+fn string_close_matches(bytes: &[u8], at: usize, hashes: usize) -> bool {
+    if at >= bytes.len() || bytes[at] != b'"' {
+        return false;
+    }
+    if hashes == 0 {
+        return true;
+    }
+    let tail = &bytes[at + 1..];
+    if tail.len() < hashes {
+        return false;
+    }
+    tail[..hashes].iter().all(|&b| b == b'#')
+}
+
+fn multiline_close_matches(bytes: &[u8], at: usize, hashes: usize) -> bool {
+    if at + 3 > bytes.len() || &bytes[at..at + 3] != b"\"\"\"" {
+        return false;
+    }
+    if hashes == 0 {
+        return true;
+    }
+    let tail = &bytes[at + 3..];
+    if tail.len() < hashes {
+        return false;
+    }
+    tail[..hashes].iter().all(|&b| b == b'#')
+}
+
+/// True when `bytes[at..]` is the start of an interpolation hole for a
+/// string with the given hash count: `\` + N `#`s + `(`.
+fn interpolation_start_matches(bytes: &[u8], at: usize, hashes: usize) -> bool {
+    if at >= bytes.len() || bytes[at] != b'\\' {
+        return false;
+    }
+    if hashes == 0 {
+        return matches!(bytes.get(at + 1), Some(b'('));
+    }
+    let tail = &bytes[at + 1..];
+    if tail.len() < hashes + 1 {
+        return false;
+    }
+    tail[..hashes].iter().all(|&b| b == b'#') && tail[hashes] == b'('
 }
 
 // ----------------------------------------------------------------------
@@ -528,17 +950,15 @@ pub fn fix_compound_keywords<'src>(tokens: &mut Vec<Token<'src>>) {
         };
         if let Some(kind) = merged {
             let new_span = a.span.join(b.span);
-            let new_text = &tokens[i].text[..0]; // placeholder, replaced below
-                                                 // Build the replacement text by extending across the join.
-                                                 // Both a.text and b.text are slices into the same source; we
-                                                 // reconstruct a single slice via raw pointer arithmetic so we
-                                                 // don't have to thread the original `&str` here.
+            // Build the replacement text by extending across the join.
+            // Both a.text and b.text are slices into the same source; we
+            // reconstruct a single slice via raw pointer arithmetic so we
+            // don't have to thread the original `&str` here.
             let merged_text = unsafe {
                 let ptr = a.text.as_ptr();
                 let len = (b.span.end - a.span.start) as usize;
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len))
             };
-            let _ = new_text;
             tokens[i] = Token::new(kind, new_span, merged_text);
             tokens.remove(i + 1);
         } else {
