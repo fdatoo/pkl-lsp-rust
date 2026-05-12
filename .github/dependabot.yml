@@ -12,3 +12,8 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # The version tag on this action is the Rust toolchain we install for
+      # the MSRV job — pinned intentionally to our supported floor. Bump it
+      # manually when we raise MSRV in Cargo.toml.
+      - dependency-name: dtolnay/rust-toolchain
