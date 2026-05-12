@@ -12,7 +12,7 @@
 //!    visible in the file plus Pkl keywords.
 
 use pkl_analyze::infer::{stdlib_members_of, user_members_of};
-use pkl_analyze::ModuleGraph;
+use pkl_analyze::{ModuleGraph, WorkspaceIndex};
 use pkl_stdlib::MemberKind;
 use tower_lsp::lsp_types::*;
 
@@ -57,6 +57,8 @@ const KEYWORDS: &[&str] = &[
 pub fn complete_at(
     doc: &Document,
     graph: &ModuleGraph,
+    workspace_index: &WorkspaceIndex,
+    uri: &Url,
     position: Position,
 ) -> Option<CompletionResponse> {
     let offset = doc.position_to_offset(position);
@@ -65,7 +67,14 @@ pub fn complete_at(
 
     let items = match context {
         Context::Member { dot_pos } => member_completions(doc, dot_pos as u32),
-        Context::ImportPath => import_path_completions(graph),
+        Context::ImportPath { quote_start } => import_path_completions(
+            doc,
+            graph,
+            workspace_index,
+            uri,
+            quote_start,
+            offset as usize,
+        ),
         Context::TopLevel => top_level_completions(doc),
     };
     Some(CompletionResponse::Array(items))
@@ -73,8 +82,15 @@ pub fn complete_at(
 
 #[derive(Debug)]
 enum Context {
-    Member { dot_pos: usize },
-    ImportPath,
+    Member {
+        dot_pos: usize,
+    },
+    /// Cursor is inside an `import "..."` string literal. `quote_start`
+    /// is the byte offset of the opening `"`, so the in-quotes prefix
+    /// is `text[quote_start + 1 .. cursor]`.
+    ImportPath {
+        quote_start: usize,
+    },
     TopLevel,
 }
 
@@ -84,8 +100,8 @@ fn detect_context(text: &str, offset: usize) -> Context {
     let prefix = &bytes[..offset.min(bytes.len())];
 
     // Inside an import string?
-    if is_inside_import_string(prefix) {
-        return Context::ImportPath;
+    if let Some(quote_start) = is_inside_import_string(prefix) {
+        return Context::ImportPath { quote_start };
     }
 
     // Member access: walk backwards past whitespace, looking for `.` or `?.`
@@ -102,7 +118,9 @@ fn detect_context(text: &str, offset: usize) -> Context {
     Context::TopLevel
 }
 
-fn is_inside_import_string(prefix: &[u8]) -> bool {
+/// Returns `Some(absolute_offset_of_opening_quote)` if the cursor sits
+/// inside an `import "..."` string literal on the current line.
+fn is_inside_import_string(prefix: &[u8]) -> Option<usize> {
     // Walk back, counting `"` boundaries. If we're inside a string that
     // sits on the same line as an `import` keyword, treat as import path.
     let mut line_start = prefix.len();
@@ -110,14 +128,24 @@ fn is_inside_import_string(prefix: &[u8]) -> bool {
         line_start -= 1;
     }
     let line = &prefix[line_start..];
-    let quotes = line.iter().filter(|&&b| b == b'"').count();
-    if quotes % 2 != 1 {
-        return false;
+    let mut last_quote: Option<usize> = None;
+    let mut quote_count = 0usize;
+    for (i, &b) in line.iter().enumerate() {
+        if b == b'"' {
+            last_quote = Some(line_start + i);
+            quote_count += 1;
+        }
+    }
+    if quote_count % 2 != 1 {
+        return None;
     }
     // The line so far contains an odd number of quotes — we're inside a
     // string. Check for `import` earlier on the line.
     let line_text = std::str::from_utf8(line).unwrap_or("");
-    line_text.contains("import")
+    if !line_text.contains("import") {
+        return None;
+    }
+    last_quote
 }
 
 // ----------------------------------------------------------------------
@@ -222,12 +250,89 @@ fn member_completions(doc: &Document, dot_pos: u32) -> Vec<CompletionItem> {
 }
 
 // ----------------------------------------------------------------------
-// Import-path completions: namespace prefixes and `pkl:` modules.
+// Import-path completions: `pkl:` stdlib modules and workspace files.
 
-fn import_path_completions(_graph: &ModuleGraph) -> Vec<CompletionItem> {
-    // Bundled `pkl:` modules. The graph knows about user-configured
-    // namespaces too, but those aren't queryable through its current
-    // API — they live on the loader.
+fn import_path_completions(
+    doc: &Document,
+    _graph: &ModuleGraph,
+    workspace_index: &WorkspaceIndex,
+    uri: &Url,
+    quote_start: usize,
+    cursor: usize,
+) -> Vec<CompletionItem> {
+    // Recover the in-quotes prefix and the LSP range covering it so the
+    // editor can replace the user's partial text with the picked path.
+    let text = doc.rope.to_string();
+    let text_len = text.len();
+    let in_quotes_start = (quote_start + 1).min(text_len);
+    let cursor = cursor.min(text_len);
+    let prefix = if cursor > in_quotes_start {
+        &text[in_quotes_start..cursor]
+    } else {
+        ""
+    };
+
+    // (1) `pkl:` stdlib branch — unchanged behaviour, no text_edit so the
+    // existing IDE UX is preserved.
+    if prefix.starts_with("pkl:") {
+        return stdlib_import_completions();
+    }
+
+    // (2) `package:` is out of scope; bail without offering anything.
+    if prefix.starts_with("package:") {
+        return Vec::new();
+    }
+
+    // (3) Anything else: workspace files. Resolve the current document's
+    // filesystem path through the URI; non-file schemes have nothing to
+    // offer.
+    let Ok(current_path) = uri.to_file_path() else {
+        // Still surface stdlib options as a fallback — the user might
+        // be typing `pkl:` next.
+        return stdlib_import_completions();
+    };
+
+    let range_start_pos = crate::document::byte_to_position(&doc.rope, in_quotes_start);
+    let range_end_pos = crate::document::byte_to_position(&doc.rope, cursor);
+    let replace_range = Range {
+        start: range_start_pos,
+        end: range_end_pos,
+    };
+
+    let workspace_candidates = workspace_index.completions_for(&current_path, prefix);
+    let mut items: Vec<CompletionItem> = workspace_candidates
+        .into_iter()
+        .enumerate()
+        .map(|(idx, c)| CompletionItem {
+            label: c.display.clone(),
+            kind: Some(CompletionItemKind::FILE),
+            detail: Some(c.insert.clone()),
+            filter_text: Some(c.insert.clone()),
+            // `sort_text` is a lexicographic key; pad the index so 10
+            // doesn't sort ahead of 2.
+            sort_text: Some(format!("{:05}", idx)),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                range: replace_range,
+                new_text: c.insert,
+            })),
+            ..Default::default()
+        })
+        .collect();
+
+    // Always also offer the `pkl:` modules so they're discoverable from a
+    // blank import — but rank them below workspace files.
+    let stdlib_offset = items.len();
+    for (i, item) in stdlib_import_completions().into_iter().enumerate() {
+        items.push(CompletionItem {
+            sort_text: Some(format!("z{:05}", stdlib_offset + i)),
+            ..item
+        });
+    }
+
+    items
+}
+
+fn stdlib_import_completions() -> Vec<CompletionItem> {
     pkl_stdlib::vendored::MODULES
         .iter()
         .map(|m| CompletionItem {

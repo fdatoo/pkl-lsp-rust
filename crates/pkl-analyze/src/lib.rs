@@ -22,6 +22,7 @@ pub mod scopes;
 pub mod subtyping;
 pub mod symbols;
 pub mod types;
+pub mod workspace_files;
 
 use pkl_syntax::cst::{AstNode, Module};
 use pkl_syntax::{SyntaxDiagnostic, SyntaxNode};
@@ -36,6 +37,7 @@ pub use module_graph::{ImportError, ModuleEntry, ModuleGraph};
 pub use resolver::{resolve_module, ImportInfo, Reference, Resolution};
 pub use symbols::{Origin, Symbol, SymbolId, SymbolKind, SymbolTable};
 pub use types::Ty;
+pub use workspace_files::{ImportCompletion, ImportCompletionKind, WorkspaceIndex};
 
 /// Convenience: every output the LSP needs from a single file.
 pub struct Analysis {
