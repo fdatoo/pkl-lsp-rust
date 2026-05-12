@@ -129,6 +129,14 @@ Legend:
 
 - [x] **Completion provider.** Top-level identifiers, member completion
   off the receiver type, import-path completion of `pkl:` modules.
+- [x] **Workspace-aware import-path completion.** `pkl-analyze`'s
+  `WorkspaceIndex` scans every `workspaceFolders` / `rootUri` root on
+  `initialize` (depth-capped, skips `.git` / `node_modules` / `target` /
+  `dist` / `build`) and indexes every `.pkl` file. Inside an
+  `import "..."` string, completion emits `File` items with a relative-
+  path `text_edit` replacing the in-quotes span; same-directory
+  candidates outrank descendants which outrank parent-jumps. `did_open`
+  and `did_change_watched_files` keep the index in sync.
 - [x] **References (`textDocument/references`).**
 - [x] **Rename (`textDocument/rename` + `prepareRename`).** Cross-file
   rename still future work — would need a multi-file `WorkspaceEdit`
