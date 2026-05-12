@@ -221,5 +221,3 @@ Key pieces:
 * A full Hindley-Milner type checker. The inferrer is single-pass and
   greedy. Generic substitution is best-effort; subtyping is
   conservative so we never lie to the user with a false positive.
-* Cross-file references / rename. The graph tracks dependents but the
-  LSP layer only emits intra-file edits today.
