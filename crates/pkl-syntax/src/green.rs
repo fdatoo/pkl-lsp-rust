@@ -49,6 +49,11 @@ struct Parser<'src> {
     pos: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<SyntaxDiagnostic>,
+    /// True once we've emitted a "found end of file" diagnostic. Used to
+    /// suppress the cascading expectations that follow when the user is
+    /// in the middle of typing — they only need to see the first
+    /// "unexpected end of file" message in the problems panel.
+    at_eof_reported: bool,
 }
 
 impl<'src> Parser<'src> {
@@ -58,6 +63,7 @@ impl<'src> Parser<'src> {
             pos: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics: Vec::new(),
+            at_eof_reported: false,
         }
     }
 
@@ -179,6 +185,9 @@ impl<'src> Parser<'src> {
     fn expect(&mut self, kind: SyntaxKind, what: &str) {
         if self.at(kind) {
             self.bump();
+        } else if self.at_eof() && self.at_eof_reported {
+            // Already told the user the source ends abruptly; don't
+            // bury them in cascading expectations.
         } else {
             let span = self.peek_span();
             let desc = self.peek_describe();
@@ -186,6 +195,9 @@ impl<'src> Parser<'src> {
                 span,
                 format!("expected {} ({}), found {}", what, kind, desc),
             );
+            if self.at_eof() {
+                self.at_eof_reported = true;
+            }
         }
     }
 
@@ -211,6 +223,9 @@ impl<'src> Parser<'src> {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics
             .push(SyntaxDiagnostic::error(span, msg.into()));
+        if self.at_eof() {
+            self.at_eof_reported = true;
+        }
     }
 
     /// Resync to the next likely declaration boundary.
@@ -907,15 +922,17 @@ impl<'src> Parser<'src> {
         self.parse_expr_primary();
         loop {
             match self.peek_kind() {
-                SyntaxKind::Dot => {
-                    self.bump();
-                    self.parse_identifier_opt();
-                    self.start_node_at(cp, SyntaxKind::MemberExpr);
-                    self.finish_node();
-                }
-                SyntaxKind::QuestionDot => {
-                    self.bump();
-                    self.parse_identifier_opt();
+                SyntaxKind::Dot | SyntaxKind::QuestionDot => {
+                    self.bump(); // `.` or `?.`
+                    if !self.parse_identifier_opt() {
+                        // Recovery: emit a diagnostic and an Error
+                        // placeholder so completion can still see this
+                        // is a member-access context.
+                        let span = self.peek_span();
+                        self.error(span, "expected member name after `.`");
+                        self.start_node(SyntaxKind::ErrorNode);
+                        self.finish_node();
+                    }
                     self.start_node_at(cp, SyntaxKind::MemberExpr);
                     self.finish_node();
                 }
@@ -925,9 +942,7 @@ impl<'src> Parser<'src> {
                     self.finish_node();
                 }
                 SyntaxKind::LBracket => {
-                    self.bump();
-                    self.parse_expr();
-                    self.expect(SyntaxKind::RBracket, "closing `]`");
+                    self.parse_index_tail();
                     self.start_node_at(cp, SyntaxKind::IndexExpr);
                     self.finish_node();
                 }
@@ -945,6 +960,23 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
+    }
+
+    /// Parse the `[ expr ]` tail of an index expression with recovery.
+    /// On `foo[<EOF>` emits a single "expected index expression"
+    /// diagnostic and an `ErrorNode` placeholder rather than the
+    /// cascading "expected expression" + "expected closing `]`" pair.
+    fn parse_index_tail(&mut self) {
+        self.bump(); // [
+        if self.at(SyntaxKind::RBracket) || self.at_eof() {
+            let span = self.peek_span();
+            self.error(span, "expected index expression after `[`");
+            self.start_node(SyntaxKind::ErrorNode);
+            self.finish_node();
+        } else {
+            self.parse_expr();
+        }
+        self.expect(SyntaxKind::RBracket, "closing `]`");
     }
 
     fn parse_arg_list(&mut self) {
@@ -976,6 +1008,7 @@ impl<'src> Parser<'src> {
                 self.bump();
                 self.finish_node();
             }
+            SyntaxKind::StringQuoteOpen => self.parse_interpolated_string(),
             SyntaxKind::ThisKw
             | SyntaxKind::SuperKw
             | SyntaxKind::OuterKw
@@ -1028,9 +1061,11 @@ impl<'src> Parser<'src> {
                 self.finish_node();
             }
             _ => {
-                let span = self.peek_span();
-                let desc = self.peek_describe();
-                self.error(span, format!("expected expression, found {}", desc));
+                if !(self.at_eof() && self.at_eof_reported) {
+                    let span = self.peek_span();
+                    let desc = self.peek_describe();
+                    self.error(span, format!("expected expression, found {}", desc));
+                }
                 self.start_node(SyntaxKind::ErrorNode);
                 if !self.at_eof() {
                     self.bump();
@@ -1038,6 +1073,78 @@ impl<'src> Parser<'src> {
                 self.finish_node();
             }
         }
+    }
+
+    /// Parse an interpolated string. Caller has verified that the current
+    /// significant token is a `StringQuoteOpen`. The opening token's text
+    /// determines whether the resulting node is an `InterpolatedString` or
+    /// an `InterpolatedMultilineString` (we look for `"""` after any leading
+    /// `#` characters).
+    fn parse_interpolated_string(&mut self) {
+        let multiline = self.peek_open_is_multiline();
+        let node_kind = if multiline {
+            SyntaxKind::InterpolatedMultilineString
+        } else {
+            SyntaxKind::InterpolatedString
+        };
+        self.start_node(node_kind);
+        // Opening quote.
+        self.bump();
+        loop {
+            match self.peek_kind() {
+                SyntaxKind::StringPart | SyntaxKind::MultilineStringPart => {
+                    self.bump();
+                }
+                SyntaxKind::InterpolationStart => {
+                    self.start_node(SyntaxKind::Interpolation);
+                    self.bump();
+                    // Parse the inner expression. The lexer has switched to
+                    // Normal mode for the duration of the hole.
+                    self.parse_expr();
+                    if self.at(SyntaxKind::InterpolationEnd) {
+                        self.bump();
+                    } else {
+                        let span = self.peek_span();
+                        self.error(span, "unterminated string interpolation");
+                    }
+                    self.finish_node();
+                }
+                SyntaxKind::StringQuoteClose => {
+                    self.bump();
+                    break;
+                }
+                SyntaxKind::Eof => {
+                    let span = self.peek_span();
+                    self.error(span, "unterminated string literal");
+                    break;
+                }
+                _ => {
+                    // Unexpected token inside a string body. Bail out so we
+                    // don't loop forever; the caller's recovery will pick up
+                    // where we left off.
+                    let span = self.peek_span();
+                    self.error(span, "unexpected token in string literal");
+                    break;
+                }
+            }
+        }
+        self.finish_node();
+    }
+
+    /// Inspect the raw text of the upcoming `StringQuoteOpen` token to see
+    /// whether it represents a triple-quoted `"""..."""` form.
+    fn peek_open_is_multiline(&self) -> bool {
+        let i = self.skip_trivia_from(self.pos);
+        let Some(tok) = self.tokens.get(i) else {
+            return false;
+        };
+        // Skip leading `#` characters.
+        let bytes = tok.text.as_bytes();
+        let mut j = 0;
+        while bytes.get(j) == Some(&b'#') {
+            j += 1;
+        }
+        bytes.get(j..j + 3) == Some(b"\"\"\"")
     }
 
     /// `(...) ->` after balanced parens.
@@ -1410,6 +1517,79 @@ mod tests {
         // Garbage at top level — we should still emit an ErrorNode and
         // preserve the bytes.
         round_trip("@@@ what is this\nx = 1\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_basic() {
+        round_trip("x = \"hello \\(name)\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_with_nested_call() {
+        round_trip("x = \"a \\(f(b, c)) end\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_with_nested_string() {
+        round_trip("x = \"\\(\"inner\")\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_multiple_holes() {
+        round_trip("x = \"\\(a)\\(b)\\(c)\"\n");
+    }
+
+    #[test]
+    fn interpolated_string_builds_node() {
+        let parsed = parse_green("x = \"hello \\(name)\"\n");
+        // Find the InterpolatedString node anywhere in the tree.
+        let mut saw_node = false;
+        let mut saw_hole = false;
+        for desc in parsed.syntax.descendants() {
+            if desc.kind() == SyntaxKind::InterpolatedString {
+                saw_node = true;
+            }
+            if desc.kind() == SyntaxKind::Interpolation {
+                saw_hole = true;
+            }
+        }
+        assert!(saw_node, "expected InterpolatedString node");
+        assert!(saw_hole, "expected Interpolation node");
+    }
+
+    #[test]
+    fn rt_interpolated_multiline_string() {
+        round_trip("x = \"\"\"\nhello \\(name)\nworld\n\"\"\"\n");
+    }
+
+    #[test]
+    fn interpolated_multiline_builds_node() {
+        let parsed = parse_green("x = \"\"\"\n\\(name)\n\"\"\"\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut saw_multi = false;
+        for desc in parsed.syntax.descendants() {
+            if desc.kind() == SyntaxKind::InterpolatedMultilineString {
+                saw_multi = true;
+            }
+        }
+        assert!(saw_multi, "expected InterpolatedMultilineString node");
+    }
+
+    #[test]
+    fn rt_custom_delim_interpolated_string() {
+        // `\#(name)` is the 1-hash interpolation marker.
+        round_trip("x = #\"hello \\#(name)!\"#\n");
+    }
+
+    #[test]
+    fn rt_custom_delim_interpolated_multiline() {
+        round_trip("x = #\"\"\"\n\\#(name)\n\"\"\"#\n");
+    }
+
+    #[test]
+    fn rt_custom_delim_without_interpolation_stays_legacy() {
+        // No matching-hash `\#(` -> single literal, same as before.
+        round_trip("x = #\"raw \\(text) here\"#\n");
     }
 
     #[test]

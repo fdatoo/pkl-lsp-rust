@@ -25,6 +25,31 @@ const SEEDS: &[&str] = &[
     "@Deprecated\n@Since { version = \"1\" }\nfunction f(): Int = 1",
     "for (x in y) for (z in w) new { a = z }",
     "x = 1.s + 2.ms + 3.gib",
+    // String interpolation seeds — every flavour and a few malformed
+    // variations so the recovery path is exercised.
+    "x = \"\\(name)\"",
+    "x = \"a\\(name)b\"",
+    "x = \"\\(\\(nested))\"",
+    "x = \"\\(\"inner\")\"",
+    "x = \"\\(\"\\(inner)\")\"",
+    "x = \"\"\"\nhello \\(world)\n\"\"\"",
+    "x = #\"hello \\#(name)\"#",
+    "x = ##\"hello \\##(name)\"##",
+    "x = \"unterminated\\(",
+    "x = \"unterm\\(123",
+    "x = \"\\(",
+    "x = \"\\(let (a = 1) a + 2)\"",
+    "x = #\"\\#(\"#",
+];
+
+/// String contexts where injecting an interpolation hole is a useful
+/// stress test for the lexer mode stack.
+const INTERP_INSERTIONS: &[&str] = &[
+    "\\(x)",
+    "\\(1 + 2)",
+    "\\(\"inner\")",
+    "\\(let (a = 1) a)",
+    "\\(",
 ];
 
 /// Mutate `seed` into many short variants by inserting, deleting, and
@@ -70,6 +95,43 @@ fn parser_handles_extremely_nested_input() {
     }
     for _ in 0..500 {
         s.push_str(" }");
+    }
+    let _ = parse(&s);
+}
+
+/// Walks every seed and, at every byte offset that sits inside a string
+/// literal, injects each of `INTERP_INSERTIONS`. The goal isn't grammatical
+/// coverage — it's to catch panics in the lexer's mode stack when the
+/// interpolation marker shows up in surprising positions (e.g. immediately
+/// before a closing quote, at the start of a multi-line body, etc.).
+#[test]
+fn parser_does_not_panic_on_interpolation_injections() {
+    for seed in SEEDS {
+        for (i, ch) in seed.char_indices() {
+            // Only inject inside string literals — naive heuristic: just
+            // try inserting at every offset. Bad inputs are filtered by
+            // the parser, which is what we want to exercise.
+            let _ = ch;
+            for ins in INTERP_INSERTIONS {
+                let mut s = seed.to_string();
+                s.insert_str(i, ins);
+                let _ = parse(&s);
+            }
+        }
+    }
+}
+
+#[test]
+fn parser_handles_deeply_nested_interpolation() {
+    // Construct a deeply nested chain of `"\("\(...)")"` to make sure
+    // the lexer's mode stack doesn't blow up at depth.
+    let mut s = String::new();
+    for _ in 0..100 {
+        s.push_str("\"\\(");
+    }
+    s.push('x');
+    for _ in 0..100 {
+        s.push_str(")\"");
     }
     let _ = parse(&s);
 }

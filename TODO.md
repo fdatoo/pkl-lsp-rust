@@ -12,12 +12,20 @@ Legend:
 
 ## Lexer / Parser (`pkl-syntax`)
 
-- [-] **String interpolation tokens.** `"\(expr)"` is still emitted as one
-  `String` token; the parser doesn't see the embedded expressions, so
-  hover/goto inside an interpolation can't work. Deferred: requires a
-  stateful re-entrant lexer and a new AST shape.
-- [-] **Custom-delimited string interpolation.** Same as above for
-  `#"...#\(expr)..."#`.
+- [x] **String interpolation tokens.** Interpolated strings are
+  decomposed by a mode-stack-driven lexer into `StringQuoteOpen`,
+  `StringPart` / `MultilineStringPart`, `InterpolationStart`/`End`, and
+  `StringQuoteClose` tokens; the parser wraps these into
+  `InterpolatedString` / `InterpolatedMultilineString` nodes with one
+  `Interpolation` child per `\(...)` hole. The resolver descends into
+  each hole's expression so identifiers resolve against the surrounding
+  scope, and the inferrer types the whole string as `Ty::Str` while
+  still recording types for every inner expression. Strings without
+  interpolation keep the legacy single-token shape for backward
+  compatibility.
+- [x] **Custom-delimited string interpolation.** Same as above for
+  `#"...\#(expr)..."#` (and N-hash variants). Hash count rides on the
+  opening marker; the closing fence is a plain `)`.
 - [x] **Doc-comment recovery for leading trivia.** `cst::doc_comment_for`
   walks the leading-trivia children of a `SyntaxNode` so consumers can
   recover the doc comment for any declaration on demand.
@@ -37,6 +45,15 @@ Legend:
   both curated and mutated/random inputs. The formatter, analyzer,
   LSP feature handlers, and stdlib scraper all consume the lossless
   tree — there is no longer a separate owned AST.
+- [x] **Error recovery for mid-typing partial expressions.** Trailing
+  `foo.`, `foo(`, `foo[`, `let (x = …)`, `if (…)`, `new T {`, `foo {`,
+  and `name: T = …` now each produce the expected outer CST node
+  (`MemberExpr`, `CallExpr`, `IndexExpr`, `LetExpr`, `IfExpr`,
+  `NewExpr`, `AmendsExpr`, `PropertyDecl`) with `Error` placeholders
+  in the missing-child slots and a single, short diagnostic — keeping
+  completion, signature-help, and hover working at the exact moment
+  the user is mid-keystroke. Cascading "found end of file"
+  expectations are collapsed to the first one.
 
 ## Resolver / Symbol table (`pkl-analyze::resolver`)
 
@@ -176,8 +193,8 @@ Legend:
 - [x] **Release artifacts.** `.github/workflows/release.yml`
   cross-compiles `pkl-lsp` for x86_64 / aarch64 Linux + macOS and
   x86_64 Windows on every `v*` tag and publishes a GitHub release.
-- [-] **`pkl:` stdlib bundling.** Resolved — vendored `.pkl` files
-  shipped via `include_str!` (see `crates/pkl-stdlib/vendor/`).
+- [x] **`pkl:` stdlib bundling.** Vendored `.pkl` files shipped via
+  `include_str!` (see `crates/pkl-stdlib/vendor/`).
 
 ## Documentation
 
@@ -215,7 +232,6 @@ walks `cst::*` directly.
 ---
 
 Every actionable item above the migration list has been worked
-through. The remaining `[-]` entries are deferred by design (string
-interpolation, stdlib type-parameter symbols, transitive graph
-invalidation) with short rationales attached. Strike or add items as
-they land or emerge.
+through. The remaining `[-]` entries are deferred by design (stdlib
+type-parameter symbols, transitive graph invalidation) with short
+rationales attached. Strike or add items as they land or emerge.

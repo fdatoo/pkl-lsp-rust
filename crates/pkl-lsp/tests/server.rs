@@ -1022,6 +1022,101 @@ async fn init_default(writer: &mut DuplexStream, reader: &mut DuplexStream) {
     .await;
 }
 
+/// `foo.` is the canonical mid-typing case for completion: the user has
+/// typed the receiver and the dot but no member name yet. The parser
+/// must recover into a `MemberExpr` and the completion provider must
+/// return members of `foo`'s type — not the generic top-level identifier
+/// list.
+#[tokio::test]
+async fn completion_on_trailing_dot_after_typed_property() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                "params":{"processId":null,"rootUri":null,"capabilities":{}}}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    // Layout:
+    //   line 0: name: String = "alice"
+    //   line 1: greeting = name.       <- cursor at column 16, after `.`
+    let src = "name: String = \"alice\"\ngreeting = name.\n";
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": "file:///tmp/partial.pkl",
+                "languageId": "pkl",
+                "version": 1,
+                "text": src
+            }}
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/partial.pkl"},
+                "position": {"line": 1, "character": 16}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+
+    // Should be member completions of `String`, not the generic top-level list.
+    assert!(
+        labels.contains(&"length"),
+        "expected `length` for String member completion, got {:?}",
+        labels
+    );
+    // And definitely should NOT contain the user-scope keywords like `class`
+    // or the user's other property names — that would mean we fell through
+    // to top-level identifier completion.
+    assert!(
+        !labels.contains(&"class"),
+        "top-level completion leaked through, got {:?}",
+        labels
+    );
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
 async fn open_doc(writer: &mut DuplexStream, reader: &mut DuplexStream, uri: &str, text: &str) {
     send(
         writer,
