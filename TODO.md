@@ -174,8 +174,8 @@ Legend:
 - [x] **Release artifacts.** `.github/workflows/release.yml`
   cross-compiles `pkl-lsp` for x86_64 / aarch64 Linux + macOS and
   x86_64 Windows on every `v*` tag and publishes a GitHub release.
-- [-] **`pkl:` stdlib bundling.** Resolved — vendored `.pkl` files
-  shipped via `include_str!` (see `crates/pkl-stdlib/vendor/`).
+- [x] **`pkl:` stdlib bundling.** Vendored `.pkl` files shipped via
+  `include_str!` (see `crates/pkl-stdlib/vendor/`).
 
 ## Documentation
 
