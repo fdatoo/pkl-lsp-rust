@@ -1233,15 +1233,9 @@ impl<'src> Parser<'src> {
                     _ => {}
                 }
             }
-            SyntaxKind::Ident | SyntaxKind::QuotedIdent => {
-                if self.looks_like_property_decl() {
-                    let cp = self.checkpoint();
-                    self.parse_property_as(cp, SyntaxKind::ObjectProperty);
-                } else {
-                    self.start_node(SyntaxKind::ObjectElement);
-                    self.parse_expr();
-                    self.finish_node();
-                }
+            SyntaxKind::Ident | SyntaxKind::QuotedIdent if self.looks_like_property_decl() => {
+                let cp = self.checkpoint();
+                self.parse_property_as(cp, SyntaxKind::ObjectProperty);
             }
             SyntaxKind::At => {
                 let cp = self.checkpoint();

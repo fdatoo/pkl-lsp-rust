@@ -263,7 +263,7 @@ impl ModuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loader::{FsLoader, FsLoaderConfig};
+    use crate::loader::{path_to_uri, FsLoader, FsLoaderConfig};
     use std::collections::HashMap as Map;
     use std::path::PathBuf;
 
@@ -376,7 +376,11 @@ mod tests {
         graph.upsert(a_uri.clone(), src, true);
 
         assert!(graph.get(&a_uri).is_some());
-        let b_uri = format!("file://{}", b.display());
+        // The loader canonicalises paths before storing them, which on macOS
+        // resolves /var → /private/var and on Windows produces a `\\?\`
+        // extended-length prefix. Mirror that here so the lookup key matches
+        // what the loader actually inserted.
+        let b_uri = path_to_uri(&b.canonicalize().unwrap());
         assert!(graph.get(&b_uri).is_some());
     }
 
@@ -396,14 +400,8 @@ mod tests {
         let src = std::fs::read_to_string(&main).unwrap();
         graph.upsert(main_uri.clone(), src, true);
 
-        let one_uri = format!(
-            "file://{}",
-            parts.join("one.pkl").canonicalize().unwrap().display()
-        );
-        let two_uri = format!(
-            "file://{}",
-            parts.join("two.pkl").canonicalize().unwrap().display()
-        );
+        let one_uri = path_to_uri(&parts.join("one.pkl").canonicalize().unwrap());
+        let two_uri = path_to_uri(&parts.join("two.pkl").canonicalize().unwrap());
         assert!(
             graph.get(&one_uri).is_some(),
             "expected one.pkl in graph, have {:?}",

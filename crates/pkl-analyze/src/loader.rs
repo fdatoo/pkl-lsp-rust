@@ -619,6 +619,10 @@ mod tests {
         }
     }
 
+    // Unix-only: hardcodes a POSIX-style importer URI without a drive letter,
+    // which `uri_to_path` doesn't handle on Windows. Windows path resolution
+    // is exercised through the higher-level module_graph tests.
+    #[cfg(not(windows))]
     #[test]
     fn relative_path_resolved_against_importer() {
         let importer = "file:///tmp/project/main.pkl";

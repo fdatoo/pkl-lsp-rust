@@ -266,7 +266,7 @@ impl<'src> Lexer<'src> {
             let close_needle: Vec<u8> = b"\"\"\""
                 .iter()
                 .copied()
-                .chain(std::iter::repeat(b'#').take(hashes))
+                .chain(std::iter::repeat_n(b'#', hashes))
                 .collect();
             while self.pos < self.bytes.len() {
                 if self.bytes[self.pos..].starts_with(&close_needle) {
@@ -279,7 +279,7 @@ impl<'src> Lexer<'src> {
         } else {
             self.pos += 1; // opening "
             let close_needle: Vec<u8> = std::iter::once(b'"')
-                .chain(std::iter::repeat(b'#').take(hashes))
+                .chain(std::iter::repeat_n(b'#', hashes))
                 .collect();
             while self.pos < self.bytes.len() {
                 if self.bytes[self.pos..].starts_with(&close_needle) {

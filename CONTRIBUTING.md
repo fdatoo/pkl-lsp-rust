@@ -27,7 +27,7 @@ cd fuzz && cargo +nightly fuzz run parse
 ```
 
 CI runs rustfmt, clippy, build, and tests on Linux + macOS and an MSRV
-`cargo check` on Rust 1.80.
+`cargo check` on Rust 1.86.
 
 ## Coding conventions
 

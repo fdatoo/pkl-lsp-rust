@@ -55,10 +55,13 @@ jobs:
       - run: cargo test --workspace --doc
 
   msrv:
-    name: msrv (1.80)
+    name: msrv (1.86)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
+      - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
+      # Library + binary targets only. `--all-targets` pulls in dev-deps
+      # (criterion, etc.) whose MSRV moves faster than ours; we only
+      # guarantee the shipped surface.
+      - run: cargo check --workspace --locked

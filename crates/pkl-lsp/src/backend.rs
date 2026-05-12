@@ -308,13 +308,10 @@ impl LanguageServer for Backend {
         for change in &params.changes {
             let uri = url_to_module_uri(&change.uri);
             match change.typ {
-                FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    // Only refresh modules we already know about. New
-                    // arbitrary files aren't pulled in until something
-                    // imports them.
-                    if graph.get(&uri).is_some() {
-                        graph.refresh_from_loader(&uri);
-                    }
+                // Only refresh modules we already know about. New arbitrary
+                // files aren't pulled in until something imports them.
+                FileChangeType::CREATED | FileChangeType::CHANGED if graph.get(&uri).is_some() => {
+                    graph.refresh_from_loader(&uri);
                 }
                 FileChangeType::DELETED => {
                     graph.remove(&uri);
