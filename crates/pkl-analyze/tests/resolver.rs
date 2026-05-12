@@ -207,6 +207,23 @@ fn let_binding_visible_inside_interpolation_hole() {
 }
 
 #[test]
+fn ident_inside_custom_delim_interpolation_resolves() {
+    // Custom-delimited 1-hash string: interpolation marker is `\#(`.
+    let src = "name: String = \"alice\"\nx = #\"hi \\#(name)!\"#\n";
+    let r = resolve(src);
+    let name_sym = r
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymbolKind::Property))
+        .expect("name property registered");
+    let interp_offset = src.rfind("name").unwrap() as u32;
+    let resolved = r
+        .symbol_at_offset(interp_offset)
+        .expect("hole identifier resolves");
+    assert_eq!(resolved, name_sym.id);
+}
+
+#[test]
 fn ident_inside_multiline_interpolation_resolves() {
     // A triple-quoted multiline string with an interpolation should
     // resolve the inner identifier just like the single-line case.

@@ -304,6 +304,59 @@ fn lexes_interpolated_multiline_pieces() {
 }
 
 #[test]
+fn custom_delim_string_without_interpolation_stays_single_token() {
+    // `#"hello \(name)"#` — the `\(` is NOT an interpolation because the
+    // string is `#`-delimited and `\(` lacks the matching `#`. Should
+    // stay as a single token.
+    let pieces = kinds(r##"#"hello \(name)"#"##);
+    assert_eq!(pieces, vec![SyntaxKind::String, SyntaxKind::Eof]);
+}
+
+#[test]
+fn custom_delim_string_with_interpolation_decomposes() {
+    // `#"a\#(name)b"#` — `\#(` IS an interpolation marker here because
+    // the hash count matches.
+    let src = r##"#"a\#(name)b"#"##;
+    let pieces = kinds(src);
+    assert_eq!(
+        pieces,
+        vec![
+            SyntaxKind::StringQuoteOpen,
+            SyntaxKind::StringPart,
+            SyntaxKind::InterpolationStart,
+            SyntaxKind::Ident,
+            SyntaxKind::InterpolationEnd,
+            SyntaxKind::StringPart,
+            SyntaxKind::StringQuoteClose,
+            SyntaxKind::Eof,
+        ]
+    );
+    // The tokens should reconstruct the source.
+    let reconstructed: String = tokenize(src).iter().map(|t| t.text).collect();
+    assert_eq!(reconstructed, src);
+}
+
+#[test]
+fn double_hash_custom_string_with_interpolation() {
+    // `##"a\##(name)b"##`
+    let src = r###"##"a\##(name)b"##"###;
+    let pieces = kinds(src);
+    assert_eq!(
+        pieces,
+        vec![
+            SyntaxKind::StringQuoteOpen,
+            SyntaxKind::StringPart,
+            SyntaxKind::InterpolationStart,
+            SyntaxKind::Ident,
+            SyntaxKind::InterpolationEnd,
+            SyntaxKind::StringPart,
+            SyntaxKind::StringQuoteClose,
+            SyntaxKind::Eof,
+        ]
+    );
+}
+
+#[test]
 fn plain_multiline_string_stays_single_token_without_interpolation() {
     // No `\(` -> the legacy single-token path should still apply.
     let pieces = kinds("\"\"\"\nhello world\n\"\"\"");

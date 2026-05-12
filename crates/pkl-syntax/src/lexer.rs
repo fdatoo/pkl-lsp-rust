@@ -48,10 +48,9 @@ enum Mode {
         multiline: bool,
     },
     /// Inside an `\(...)` interpolation hole. We lex normal Pkl tokens but
-    /// track paren depth so that a top-level `)` (matched to the right
-    /// number of `#` characters for custom-delimited strings) ends the
-    /// hole and pops back to the surrounding `String` mode.
-    Interpolation { hashes: u32, paren_depth: u32 },
+    /// track paren depth so that only a top-level `)` ends the hole and
+    /// pops back to the surrounding `String` mode.
+    Interpolation { paren_depth: u32 },
 }
 
 impl<'src> Lexer<'src> {
@@ -163,15 +162,6 @@ impl<'src> Lexer<'src> {
         self.bytes
             .get(self.pos..self.pos + needle.len())
             .is_some_and(|s| s == needle)
-    }
-
-    /// Count how many consecutive `#` bytes appear at `self.pos + offset`.
-    fn count_hashes_at(&self, offset: usize) -> usize {
-        let mut n = 0usize;
-        while matches!(self.peek_byte(offset + n), Some(b'#')) {
-            n += 1;
-        }
-        n
     }
 
     /// Number of bytes occupied by the UTF-8 character at `self.pos`.
@@ -544,10 +534,7 @@ impl<'src> Lexer<'src> {
         if interpolation_start_matches(self.bytes, self.pos, hashes) {
             let len = 2 + hashes; // `\` + N hashes + `(`
             self.pos += len;
-            self.modes.push(Mode::Interpolation {
-                hashes: hashes as u32,
-                paren_depth: 0,
-            });
+            self.modes.push(Mode::Interpolation { paren_depth: 0 });
             let span = Span::new(start as u32, self.pos as u32);
             return Some(Token::new(
                 SyntaxKind::InterpolationStart,
@@ -771,32 +758,17 @@ impl<'src> Lexer<'src> {
     ///
     /// This is also responsible for tracking paren depth inside an enclosing
     /// `Interpolation` mode: `(` bumps depth, `)` at depth>0 decrements,
-    /// `)` at depth==0 (with the right number of trailing `#`s for the
-    /// surrounding custom-delimited string) emits `InterpolationEnd` and
-    /// pops the mode.
+    /// `)` at depth==0 emits `InterpolationEnd` and pops the mode. Pkl's
+    /// custom-delimited strings use only the opening `\#(` marker; the
+    /// closing fence is the plain `)` regardless of hash count.
     fn try_lex_punct(&mut self) -> Option<SyntaxKind> {
         // First, look for an `InterpolationEnd` if we're inside a hole and
         // sitting on a `)` at depth 0.
-        if let Some(&Mode::Interpolation {
-            hashes,
-            paren_depth,
-        }) = self.modes.last()
-        {
+        if let Some(&Mode::Interpolation { paren_depth }) = self.modes.last() {
             if paren_depth == 0 && self.peek_byte(0) == Some(b')') {
-                // Need N matching trailing hashes for custom-delimited strings.
-                let hashes = hashes as usize;
-                if hashes == 0 || self.count_hashes_at(1) >= hashes {
-                    let start = self.pos;
-                    self.pos += 1 + hashes;
-                    self.modes.pop();
-                    // After popping, we are back in the surrounding String mode.
-                    let _span = Span::new(start as u32, self.pos as u32);
-                    // We return the kind only; the caller wraps it into a Token
-                    // using the span/text it computed from `self.pos`. To keep
-                    // that caller path simple we set `pos` to the post-token
-                    // position and return the kind.
-                    return Some(SyntaxKind::InterpolationEnd);
-                }
+                self.pos += 1;
+                self.modes.pop();
+                return Some(SyntaxKind::InterpolationEnd);
             }
         }
 
@@ -847,7 +819,7 @@ impl<'src> Lexer<'src> {
         };
         self.pos += consume;
         // Track paren depth for an enclosing Interpolation mode.
-        if let Some(Mode::Interpolation { paren_depth, .. }) = self.modes.last_mut() {
+        if let Some(Mode::Interpolation { paren_depth }) = self.modes.last_mut() {
             match kind {
                 SyntaxKind::LParen => *paren_depth += 1,
                 SyntaxKind::RParen if *paren_depth > 0 => *paren_depth -= 1,

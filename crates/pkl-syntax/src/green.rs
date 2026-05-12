@@ -1542,6 +1542,23 @@ mod tests {
     }
 
     #[test]
+    fn rt_custom_delim_interpolated_string() {
+        // `\#(name)` is the 1-hash interpolation marker.
+        round_trip("x = #\"hello \\#(name)!\"#\n");
+    }
+
+    #[test]
+    fn rt_custom_delim_interpolated_multiline() {
+        round_trip("x = #\"\"\"\n\\#(name)\n\"\"\"#\n");
+    }
+
+    #[test]
+    fn rt_custom_delim_without_interpolation_stays_legacy() {
+        // No matching-hash `\#(` -> single literal, same as before.
+        round_trip("x = #\"raw \\(text) here\"#\n");
+    }
+
+    #[test]
     fn module_node_root() {
         let parsed = parse_green("x = 1\n");
         assert_eq!(parsed.syntax.kind(), SyntaxKind::Module);

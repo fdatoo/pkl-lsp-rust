@@ -1163,4 +1163,11 @@ mod tests {
         let out = format_str(src);
         assert_eq!(out, src);
     }
+
+    #[test]
+    fn formats_custom_delim_interpolated_string() {
+        let src = "x = #\"hello \\#(name)!\"#\n";
+        let out = format_str(src);
+        assert_eq!(out, src);
+    }
 }
