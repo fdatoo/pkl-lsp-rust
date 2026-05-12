@@ -130,9 +130,19 @@ Legend:
 - [x] **Completion provider.** Top-level identifiers, member completion
   off the receiver type, import-path completion of `pkl:` modules.
 - [x] **References (`textDocument/references`).**
-- [x] **Rename (`textDocument/rename` + `prepareRename`).** Cross-file
-  rename still future work — would need a multi-file `WorkspaceEdit`
-  builder consuming the graph's dependents index.
+- [x] **Workspace-wide find-references.** `textDocument/references` now
+  follows imports: for a top-level user symbol, every dependent module's
+  `MemberRef` set is walked through the graph and matching `alias.<name>`
+  sites become `Location`s. Stdlib symbols and import aliases stay
+  local-only.
+- [x] **Rename (`textDocument/rename` + `prepareRename`).**
+- [x] **Workspace-wide rename.** `textDocument/rename` builds a multi-
+  file `WorkspaceEdit` via the new `ModuleGraph::references_to` helper,
+  emitting edits in every dependent module that accesses the symbol
+  through an import alias. Import aliases stay local, stdlib symbols
+  remain refused. Open dependents go through their `Document` rope;
+  unopened dependents fall back to the graph's cached source string for
+  UTF-16-correct range computation.
 - [x] **Workspace symbols.** Aggregated from every module in the graph.
 - [x] **Signature help.** Active parameter from comma-counting.
 - [x] **Code actions.** "Annotate `name: Type`" quick-fix for
