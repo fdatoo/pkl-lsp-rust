@@ -662,15 +662,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memoffset"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -911,13 +902,12 @@ dependencies = [
 
 [[package]]
 name = "rowan"
-version = "0.15.18"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62f509095fc8cc0c8c8564016771d458079c11a8d857e65861f045145c0d3208"
+checksum = "417a3a9f582e349834051b8a10c8d71ca88da4211e4093528e36b9845f6b5f21"
 dependencies = [
  "countme",
  "hashbrown 0.14.5",
- "memoffset",
  "rustc-hash",
  "text-size",
 ]
