@@ -397,3 +397,131 @@ fn collapses_cascading_eof_diagnostics() {
     // The round-trip invariant still holds for malformed input.
     assert_eq!(r.syntax().text().to_string(), "x = if (");
 }
+
+#[test]
+fn recovery_trailing_open_paren_call() {
+    let src = "x = foo(";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let call = find_node(&r.syntax(), SyntaxKind::CallExpr).expect("CallExpr present");
+    // The ArgList must be present so signature-help has a hook.
+    assert!(
+        find_node(&call, SyntaxKind::ArgList).is_some(),
+        "ArgList missing from {}",
+        call.text()
+    );
+
+    let messages: Vec<&str> = r.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 1, "diagnostics: {:?}", messages);
+    assert!(messages[0].contains("closing `)`"), "got: {:?}", messages);
+}
+
+#[test]
+fn recovery_partial_call_with_arg_comma() {
+    let src = "x = foo(1, 2,";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let call = find_node(&r.syntax(), SyntaxKind::CallExpr).expect("CallExpr present");
+    let arg_list = find_node(&call, SyntaxKind::ArgList).expect("ArgList present");
+    // Both numeric literal args should still be in the arg list so
+    // signature-help knows which slot the cursor is on.
+    let literals: Vec<_> = arg_list
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::LiteralExpr)
+        .collect();
+    assert_eq!(literals.len(), 2, "{}", arg_list.text());
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
+#[test]
+fn recovery_partial_let_binding_no_body() {
+    let src = "x = let (a = 1) ";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let let_expr = find_node(&r.syntax(), SyntaxKind::LetExpr).expect("LetExpr present");
+    // The binding should still be there so the body sees `a` in scope.
+    assert!(
+        find_node(&let_expr, SyntaxKind::Parameter).is_some(),
+        "Parameter missing from {}",
+        let_expr.text()
+    );
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
+#[test]
+fn recovery_partial_new_with_open_brace() {
+    let src = "x = new T {";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let new_expr = find_node(&r.syntax(), SyntaxKind::NewExpr).expect("NewExpr present");
+    // The ObjectBody must be a child so object-member completion fires.
+    assert!(
+        find_node(&new_expr, SyntaxKind::ObjectBody).is_some(),
+        "ObjectBody missing from {}",
+        new_expr.text()
+    );
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
+#[test]
+fn recovery_partial_amends_with_open_brace() {
+    let src = "x = foo {";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let amends = find_node(&r.syntax(), SyntaxKind::AmendsExpr).expect("AmendsExpr present");
+    assert!(
+        find_node(&amends, SyntaxKind::ObjectBody).is_some(),
+        "ObjectBody missing from {}",
+        amends.text()
+    );
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
+#[test]
+fn recovery_property_with_trailing_eq() {
+    let src = "name: Int = ";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    // The property must still parse as a PropertyDecl so completion
+    // sees the property name in scope and signature-help knows the
+    // expected type.
+    let prop = match r
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::PropertyDecl)
+    {
+        Some(n) => n,
+        None => panic!("PropertyDecl missing"),
+    };
+    let typed = pkl_syntax::cst::PropertyDecl::cast(prop).unwrap();
+    assert!(typed.name().is_some());
+    assert!(typed.ty().is_some());
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
+#[test]
+fn recovery_round_trips_for_every_partial_input() {
+    for src in [
+        "x = foo.",
+        "x = foo?.",
+        "x = foo(",
+        "x = foo(1,",
+        "x = foo[",
+        "x = let (a = 1) ",
+        "x = if (",
+        "x = new T {",
+        "x = foo {",
+        "name: Int = ",
+        "y = foo.bar(",
+        "z = bar.baz.",
+    ] {
+        let r = parse(src);
+        assert_round_trip(src, &r);
+    }
+}
