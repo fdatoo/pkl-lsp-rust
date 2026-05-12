@@ -976,6 +976,7 @@ impl<'src> Parser<'src> {
                 self.bump();
                 self.finish_node();
             }
+            SyntaxKind::StringQuoteOpen => self.parse_interpolated_string(),
             SyntaxKind::ThisKw
             | SyntaxKind::SuperKw
             | SyntaxKind::OuterKw
@@ -1038,6 +1039,78 @@ impl<'src> Parser<'src> {
                 self.finish_node();
             }
         }
+    }
+
+    /// Parse an interpolated string. Caller has verified that the current
+    /// significant token is a `StringQuoteOpen`. The opening token's text
+    /// determines whether the resulting node is an `InterpolatedString` or
+    /// an `InterpolatedMultilineString` (we look for `"""` after any leading
+    /// `#` characters).
+    fn parse_interpolated_string(&mut self) {
+        let multiline = self.peek_open_is_multiline();
+        let node_kind = if multiline {
+            SyntaxKind::InterpolatedMultilineString
+        } else {
+            SyntaxKind::InterpolatedString
+        };
+        self.start_node(node_kind);
+        // Opening quote.
+        self.bump();
+        loop {
+            match self.peek_kind() {
+                SyntaxKind::StringPart | SyntaxKind::MultilineStringPart => {
+                    self.bump();
+                }
+                SyntaxKind::InterpolationStart => {
+                    self.start_node(SyntaxKind::Interpolation);
+                    self.bump();
+                    // Parse the inner expression. The lexer has switched to
+                    // Normal mode for the duration of the hole.
+                    self.parse_expr();
+                    if self.at(SyntaxKind::InterpolationEnd) {
+                        self.bump();
+                    } else {
+                        let span = self.peek_span();
+                        self.error(span, "unterminated string interpolation");
+                    }
+                    self.finish_node();
+                }
+                SyntaxKind::StringQuoteClose => {
+                    self.bump();
+                    break;
+                }
+                SyntaxKind::Eof => {
+                    let span = self.peek_span();
+                    self.error(span, "unterminated string literal");
+                    break;
+                }
+                _ => {
+                    // Unexpected token inside a string body. Bail out so we
+                    // don't loop forever; the caller's recovery will pick up
+                    // where we left off.
+                    let span = self.peek_span();
+                    self.error(span, "unexpected token in string literal");
+                    break;
+                }
+            }
+        }
+        self.finish_node();
+    }
+
+    /// Inspect the raw text of the upcoming `StringQuoteOpen` token to see
+    /// whether it represents a triple-quoted `"""..."""` form.
+    fn peek_open_is_multiline(&self) -> bool {
+        let i = self.skip_trivia_from(self.pos);
+        let Some(tok) = self.tokens.get(i) else {
+            return false;
+        };
+        // Skip leading `#` characters.
+        let bytes = tok.text.as_bytes();
+        let mut j = 0;
+        while bytes.get(j) == Some(&b'#') {
+            j += 1;
+        }
+        bytes.get(j..j + 3) == Some(b"\"\"\"")
     }
 
     /// `(...) ->` after balanced parens.
@@ -1410,6 +1483,44 @@ mod tests {
         // Garbage at top level — we should still emit an ErrorNode and
         // preserve the bytes.
         round_trip("@@@ what is this\nx = 1\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_basic() {
+        round_trip("x = \"hello \\(name)\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_with_nested_call() {
+        round_trip("x = \"a \\(f(b, c)) end\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_with_nested_string() {
+        round_trip("x = \"\\(\"inner\")\"\n");
+    }
+
+    #[test]
+    fn rt_interpolated_string_multiple_holes() {
+        round_trip("x = \"\\(a)\\(b)\\(c)\"\n");
+    }
+
+    #[test]
+    fn interpolated_string_builds_node() {
+        let parsed = parse_green("x = \"hello \\(name)\"\n");
+        // Find the InterpolatedString node anywhere in the tree.
+        let mut saw_node = false;
+        let mut saw_hole = false;
+        for desc in parsed.syntax.descendants() {
+            if desc.kind() == SyntaxKind::InterpolatedString {
+                saw_node = true;
+            }
+            if desc.kind() == SyntaxKind::Interpolation {
+                saw_hole = true;
+            }
+        }
+        assert!(saw_node, "expected InterpolatedString node");
+        assert!(saw_hole, "expected Interpolation node");
     }
 
     #[test]
