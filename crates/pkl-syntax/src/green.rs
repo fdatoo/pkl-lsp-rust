@@ -922,15 +922,17 @@ impl<'src> Parser<'src> {
         self.parse_expr_primary();
         loop {
             match self.peek_kind() {
-                SyntaxKind::Dot => {
-                    self.bump();
-                    self.parse_identifier_opt();
-                    self.start_node_at(cp, SyntaxKind::MemberExpr);
-                    self.finish_node();
-                }
-                SyntaxKind::QuestionDot => {
-                    self.bump();
-                    self.parse_identifier_opt();
+                SyntaxKind::Dot | SyntaxKind::QuestionDot => {
+                    self.bump(); // `.` or `?.`
+                    if !self.parse_identifier_opt() {
+                        // Recovery: emit a diagnostic and an Error
+                        // placeholder so completion can still see this
+                        // is a member-access context.
+                        let span = self.peek_span();
+                        self.error(span, "expected member name after `.`");
+                        self.start_node(SyntaxKind::ErrorNode);
+                        self.finish_node();
+                    }
                     self.start_node_at(cp, SyntaxKind::MemberExpr);
                     self.finish_node();
                 }

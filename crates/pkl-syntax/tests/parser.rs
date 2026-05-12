@@ -307,6 +307,54 @@ fn module_root_has_module_kind() {
     assert_eq!(r.syntax().kind(), SyntaxKind::Module);
 }
 
+// ----------------------------------------------------------------------
+// Error-recovery: mid-typing inputs that the LSP sees every keystroke.
+//
+// The invariant for every case: the round-trip holds, the expected
+// outer node kind is produced, and we emit a short diagnostic so the
+// LSP problems panel stays readable. Completion / hover / signature-
+// help walk the CST through the typed accessors, all of which return
+// `Option`s, so missing-child slots are already handled safely.
+
+fn find_node(root: &pkl_syntax::SyntaxNode, kind: SyntaxKind) -> Option<pkl_syntax::SyntaxNode> {
+    root.descendants().find(|n| n.kind() == kind)
+}
+
+fn assert_round_trip(src: &str, r: &pkl_syntax::parser::ParseResult) {
+    let text = r.syntax().text().to_string();
+    assert_eq!(text, src, "round-trip mismatch");
+}
+
+#[test]
+fn recovery_trailing_dot_member_access() {
+    let src = "x = foo.";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let member = find_node(&r.syntax(), SyntaxKind::MemberExpr).expect("MemberExpr present");
+    // The MemberExpr should still wrap the receiver and the dot.
+    assert!(member.text().to_string().ends_with('.'));
+
+    let messages: Vec<&str> = r.diagnostics.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages.len(), 1, "diagnostics: {:?}", messages);
+    assert!(
+        messages[0].contains("expected member name"),
+        "got: {:?}",
+        messages
+    );
+}
+
+#[test]
+fn recovery_trailing_question_dot_member_access() {
+    let src = "x = foo?.";
+    let r = parse(src);
+    assert_round_trip(src, &r);
+
+    let member = find_node(&r.syntax(), SyntaxKind::MemberExpr).expect("MemberExpr present");
+    assert!(member.text().to_string().contains("?."));
+    assert_eq!(r.diagnostics.len(), 1);
+}
+
 #[test]
 fn collapses_cascading_eof_diagnostics() {
     // `if (` previously cascaded five "found end of file" diagnostics
