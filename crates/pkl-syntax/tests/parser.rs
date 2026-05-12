@@ -306,3 +306,22 @@ fn module_root_has_module_kind() {
     let r = parse("x = 1");
     assert_eq!(r.syntax().kind(), SyntaxKind::Module);
 }
+
+#[test]
+fn collapses_cascading_eof_diagnostics() {
+    // `if (` previously cascaded five "found end of file" diagnostics
+    // (missing condition, `)`, then-branch, `else`, else-branch). Mid-
+    // typing input only needs the first one.
+    let r = parse("x = if (");
+    assert_eq!(
+        r.diagnostics.len(),
+        1,
+        "expected single diagnostic, got {:?}",
+        r.diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    // The round-trip invariant still holds for malformed input.
+    assert_eq!(r.syntax().text().to_string(), "x = if (");
+}

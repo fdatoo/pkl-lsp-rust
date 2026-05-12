@@ -49,6 +49,11 @@ struct Parser<'src> {
     pos: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<SyntaxDiagnostic>,
+    /// True once we've emitted a "found end of file" diagnostic. Used to
+    /// suppress the cascading expectations that follow when the user is
+    /// in the middle of typing — they only need to see the first
+    /// "unexpected end of file" message in the problems panel.
+    at_eof_reported: bool,
 }
 
 impl<'src> Parser<'src> {
@@ -58,6 +63,7 @@ impl<'src> Parser<'src> {
             pos: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics: Vec::new(),
+            at_eof_reported: false,
         }
     }
 
@@ -179,6 +185,9 @@ impl<'src> Parser<'src> {
     fn expect(&mut self, kind: SyntaxKind, what: &str) {
         if self.at(kind) {
             self.bump();
+        } else if self.at_eof() && self.at_eof_reported {
+            // Already told the user the source ends abruptly; don't
+            // bury them in cascading expectations.
         } else {
             let span = self.peek_span();
             let desc = self.peek_describe();
@@ -186,6 +195,9 @@ impl<'src> Parser<'src> {
                 span,
                 format!("expected {} ({}), found {}", what, kind, desc),
             );
+            if self.at_eof() {
+                self.at_eof_reported = true;
+            }
         }
     }
 
@@ -211,6 +223,9 @@ impl<'src> Parser<'src> {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics
             .push(SyntaxDiagnostic::error(span, msg.into()));
+        if self.at_eof() {
+            self.at_eof_reported = true;
+        }
     }
 
     /// Resync to the next likely declaration boundary.
@@ -1028,9 +1043,11 @@ impl<'src> Parser<'src> {
                 self.finish_node();
             }
             _ => {
-                let span = self.peek_span();
-                let desc = self.peek_describe();
-                self.error(span, format!("expected expression, found {}", desc));
+                if !(self.at_eof() && self.at_eof_reported) {
+                    let span = self.peek_span();
+                    let desc = self.peek_describe();
+                    self.error(span, format!("expected expression, found {}", desc));
+                }
                 self.start_node(SyntaxKind::ErrorNode);
                 if !self.at_eof() {
                     self.bump();
