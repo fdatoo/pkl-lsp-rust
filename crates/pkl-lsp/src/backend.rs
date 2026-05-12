@@ -8,7 +8,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use pkl_analyze::{FsLoader, FsLoaderConfig, ModuleGraph};
+use pkl_analyze::{FsLoader, FsLoaderConfig, ModuleGraph, WorkspaceIndex};
 // (`with_stdlib` returns a chained loader that handles `pkl:` first.)
 
 use pkl_syntax::Severity;
@@ -49,6 +49,10 @@ pub struct Backend {
     pub client: Client,
     pub documents: DashMap<Url, Document>,
     pub graph: Arc<RwLock<ModuleGraph>>,
+    /// Workspace-scoped `.pkl` file index. Populated on `initialize` from
+    /// `root_uri` / `workspace_folders`. Kept up to date via
+    /// `did_open` and `did_change_watched_files` hooks.
+    pub workspace_index: Arc<RwLock<WorkspaceIndex>>,
     /// Set after `initialize` when the client advertises
     /// `window.workDoneProgress`. Servers must not create progress
     /// tokens without that capability.
@@ -62,6 +66,7 @@ impl Backend {
             client,
             documents: DashMap::new(),
             graph: Arc::new(RwLock::new(ModuleGraph::new(loader))),
+            workspace_index: Arc::new(RwLock::new(WorkspaceIndex::empty())),
             supports_work_done_progress: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -226,9 +231,35 @@ fn short_uri(uri: &Url) -> String {
         .unwrap_or_else(|| uri.to_string())
 }
 
+/// Collect workspace roots from an `initialize` payload. Prefers
+/// `workspace_folders` when the client advertises them; falls back to
+/// `root_uri` for legacy clients. Non-`file://` URIs are skipped.
+fn workspace_roots_from_params(params: &InitializeParams) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(folders) = &params.workspace_folders {
+        for folder in folders {
+            if let Ok(path) = folder.uri.to_file_path() {
+                roots.push(path);
+            }
+        }
+    }
+    if roots.is_empty() {
+        #[allow(deprecated)]
+        if let Some(uri) = &params.root_uri {
+            if let Ok(path) = uri.to_file_path() {
+                roots.push(path);
+            }
+        }
+    }
+    roots
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Collect workspace roots before consuming the params payload.
+        let roots = workspace_roots_from_params(&params);
+
         let opts = InitOptions::parse(params.initialization_options);
         let cfg = opts.into_loader_config();
         let loader = FsLoader::with_stdlib(cfg);
@@ -242,6 +273,18 @@ impl LanguageServer for Backend {
             .unwrap_or(false);
         self.supports_work_done_progress
             .store(supports_progress, std::sync::atomic::Ordering::Relaxed);
+
+        // Scan workspace roots off the request hot path so the response
+        // isn't gated on disk I/O.
+        let workspace_index = self.workspace_index.clone();
+        tokio::task::spawn_blocking(move || {
+            let scanned = WorkspaceIndex::scan(roots);
+            // We don't have access to the async lock from inside
+            // `spawn_blocking`; instead, swap on the next read via a
+            // synchronous handoff using `blocking_write` on the Tokio
+            // `RwLock` (safe because we're inside a blocking task).
+            *workspace_index.blocking_write() = scanned;
+        });
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
@@ -265,6 +308,10 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let doc = Document::new(text.clone(), params.text_document.version);
         self.documents.insert(uri.clone(), doc);
+        // Idempotent: the index dedupes on insert.
+        if let Ok(path) = uri.to_file_path() {
+            self.workspace_index.write().await.add(path);
+        }
         let token = NumberOrString::String(format!("pkl-lsp/load/{}", uri));
         let progress_started = self.begin_progress(&token, &uri).await;
         {
@@ -305,6 +352,7 @@ impl LanguageServer for Backend {
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let mut graph = self.graph.write().await;
+        let mut index = self.workspace_index.write().await;
         for change in &params.changes {
             let uri = url_to_module_uri(&change.uri);
             match change.typ {
@@ -317,6 +365,16 @@ impl LanguageServer for Backend {
                     graph.remove(&uri);
                 }
                 _ => {}
+            }
+            // Mirror the change into the workspace index so import-path
+            // completion stays in sync with disk regardless of whether
+            // the module was already in the graph.
+            if let Ok(path) = change.uri.to_file_path() {
+                match change.typ {
+                    FileChangeType::CREATED | FileChangeType::CHANGED => index.add(path),
+                    FileChangeType::DELETED => index.remove(&path),
+                    _ => {}
+                }
             }
         }
     }
@@ -474,7 +532,8 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let graph = self.graph.read().await;
-        Ok(complete_at(&doc, &graph, position))
+        let workspace_index = self.workspace_index.read().await;
+        Ok(complete_at(&doc, &graph, &workspace_index, &uri, position))
     }
 
     async fn goto_definition(
