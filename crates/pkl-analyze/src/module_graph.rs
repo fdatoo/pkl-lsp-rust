@@ -298,8 +298,9 @@ impl ModuleGraph {
                 }
                 // The receiver must resolve to an Import symbol whose
                 // local name matches one of the aliases we collected.
-                let Some(recv_sym_id) =
-                    resolution.by_span_start.get(&member_ref.receiver_span.start)
+                let Some(recv_sym_id) = resolution
+                    .by_span_start
+                    .get(&member_ref.receiver_span.start)
                 else {
                     continue;
                 };
@@ -307,7 +308,7 @@ impl ModuleGraph {
                 if !matches!(recv_sym.kind, SymbolKind::Import { .. }) {
                     continue;
                 }
-                if !aliases.iter().any(|a| *a == recv_sym.name.as_str()) {
+                if !aliases.contains(&recv_sym.name.as_str()) {
                     continue;
                 }
                 out.push((dependent.uri.clone(), member_ref.member_name_span));
@@ -478,7 +479,12 @@ mod tests {
         assert!(graph.get(&a_uri).is_some(), "a.pkl should be in graph");
 
         let refs = graph.references_to(&a_uri, "MyClass");
-        assert_eq!(refs.len(), 2, "expected two refs to MyClass, got {:?}", refs);
+        assert_eq!(
+            refs.len(),
+            2,
+            "expected two refs to MyClass, got {:?}",
+            refs
+        );
         for (uri, span) in &refs {
             // Each ref lives in b.pkl and the span points at "MyClass".
             assert!(uri.contains("b.pkl"), "ref uri: {}", uri);
@@ -522,11 +528,7 @@ mod tests {
         let b = dir.path().join("b.pkl");
         std::fs::write(&a, "class MyClass {}\n").unwrap();
         std::fs::write(&other, "class MyClass {}\n").unwrap();
-        std::fs::write(
-            &b,
-            "import \"./other.pkl\" as o\nx = o.MyClass\n",
-        )
-        .unwrap();
+        std::fs::write(&b, "import \"./other.pkl\" as o\nx = o.MyClass\n").unwrap();
 
         let mut graph = ModuleGraph::new(loader_with_namespaces(Map::new()));
         let b_uri = format!("file://{}", b.display());
