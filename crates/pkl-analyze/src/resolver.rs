@@ -674,6 +674,13 @@ impl Resolver {
     fn resolve_expr(&mut self, expr: &Expr, scope: ScopeId) {
         match expr {
             Expr::Literal(_) => {}
+            Expr::InterpolatedString(s) => {
+                for hole in s.interpolations() {
+                    if let Some(inner) = hole.expr() {
+                        self.resolve_expr(&inner, scope);
+                    }
+                }
+            }
             Expr::Ident(id) => {
                 if let Some(tok) = id.token() {
                     // Skip special identifiers (this/super/outer/module)
