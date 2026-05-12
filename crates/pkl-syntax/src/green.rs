@@ -49,6 +49,11 @@ struct Parser<'src> {
     pos: usize,
     builder: GreenNodeBuilder<'static>,
     diagnostics: Vec<SyntaxDiagnostic>,
+    /// True once we've emitted a "found end of file" diagnostic. Used to
+    /// suppress the cascading expectations that follow when the user is
+    /// in the middle of typing — they only need to see the first
+    /// "unexpected end of file" message in the problems panel.
+    at_eof_reported: bool,
 }
 
 impl<'src> Parser<'src> {
@@ -58,6 +63,7 @@ impl<'src> Parser<'src> {
             pos: 0,
             builder: GreenNodeBuilder::new(),
             diagnostics: Vec::new(),
+            at_eof_reported: false,
         }
     }
 
@@ -179,6 +185,9 @@ impl<'src> Parser<'src> {
     fn expect(&mut self, kind: SyntaxKind, what: &str) {
         if self.at(kind) {
             self.bump();
+        } else if self.at_eof() && self.at_eof_reported {
+            // Already told the user the source ends abruptly; don't
+            // bury them in cascading expectations.
         } else {
             let span = self.peek_span();
             let desc = self.peek_describe();
@@ -186,6 +195,9 @@ impl<'src> Parser<'src> {
                 span,
                 format!("expected {} ({}), found {}", what, kind, desc),
             );
+            if self.at_eof() {
+                self.at_eof_reported = true;
+            }
         }
     }
 
@@ -211,6 +223,9 @@ impl<'src> Parser<'src> {
     fn error(&mut self, span: Span, msg: impl Into<String>) {
         self.diagnostics
             .push(SyntaxDiagnostic::error(span, msg.into()));
+        if self.at_eof() {
+            self.at_eof_reported = true;
+        }
     }
 
     /// Resync to the next likely declaration boundary.
@@ -907,15 +922,17 @@ impl<'src> Parser<'src> {
         self.parse_expr_primary();
         loop {
             match self.peek_kind() {
-                SyntaxKind::Dot => {
-                    self.bump();
-                    self.parse_identifier_opt();
-                    self.start_node_at(cp, SyntaxKind::MemberExpr);
-                    self.finish_node();
-                }
-                SyntaxKind::QuestionDot => {
-                    self.bump();
-                    self.parse_identifier_opt();
+                SyntaxKind::Dot | SyntaxKind::QuestionDot => {
+                    self.bump(); // `.` or `?.`
+                    if !self.parse_identifier_opt() {
+                        // Recovery: emit a diagnostic and an Error
+                        // placeholder so completion can still see this
+                        // is a member-access context.
+                        let span = self.peek_span();
+                        self.error(span, "expected member name after `.`");
+                        self.start_node(SyntaxKind::ErrorNode);
+                        self.finish_node();
+                    }
                     self.start_node_at(cp, SyntaxKind::MemberExpr);
                     self.finish_node();
                 }
@@ -925,9 +942,7 @@ impl<'src> Parser<'src> {
                     self.finish_node();
                 }
                 SyntaxKind::LBracket => {
-                    self.bump();
-                    self.parse_expr();
-                    self.expect(SyntaxKind::RBracket, "closing `]`");
+                    self.parse_index_tail();
                     self.start_node_at(cp, SyntaxKind::IndexExpr);
                     self.finish_node();
                 }
@@ -945,6 +960,23 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
+    }
+
+    /// Parse the `[ expr ]` tail of an index expression with recovery.
+    /// On `foo[<EOF>` emits a single "expected index expression"
+    /// diagnostic and an `ErrorNode` placeholder rather than the
+    /// cascading "expected expression" + "expected closing `]`" pair.
+    fn parse_index_tail(&mut self) {
+        self.bump(); // [
+        if self.at(SyntaxKind::RBracket) || self.at_eof() {
+            let span = self.peek_span();
+            self.error(span, "expected index expression after `[`");
+            self.start_node(SyntaxKind::ErrorNode);
+            self.finish_node();
+        } else {
+            self.parse_expr();
+        }
+        self.expect(SyntaxKind::RBracket, "closing `]`");
     }
 
     fn parse_arg_list(&mut self) {
@@ -1029,9 +1061,11 @@ impl<'src> Parser<'src> {
                 self.finish_node();
             }
             _ => {
-                let span = self.peek_span();
-                let desc = self.peek_describe();
-                self.error(span, format!("expected expression, found {}", desc));
+                if !(self.at_eof() && self.at_eof_reported) {
+                    let span = self.peek_span();
+                    let desc = self.peek_describe();
+                    self.error(span, format!("expected expression, found {}", desc));
+                }
                 self.start_node(SyntaxKind::ErrorNode);
                 if !self.at_eof() {
                     self.bump();

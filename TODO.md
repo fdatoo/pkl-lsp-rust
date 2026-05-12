@@ -45,6 +45,15 @@ Legend:
   both curated and mutated/random inputs. The formatter, analyzer,
   LSP feature handlers, and stdlib scraper all consume the lossless
   tree — there is no longer a separate owned AST.
+- [x] **Error recovery for mid-typing partial expressions.** Trailing
+  `foo.`, `foo(`, `foo[`, `let (x = …)`, `if (…)`, `new T {`, `foo {`,
+  and `name: T = …` now each produce the expected outer CST node
+  (`MemberExpr`, `CallExpr`, `IndexExpr`, `LetExpr`, `IfExpr`,
+  `NewExpr`, `AmendsExpr`, `PropertyDecl`) with `Error` placeholders
+  in the missing-child slots and a single, short diagnostic — keeping
+  completion, signature-help, and hover working at the exact moment
+  the user is mid-keystroke. Cascading "found end of file"
+  expectations are collapsed to the first one.
 
 ## Resolver / Symbol table (`pkl-analyze::resolver`)
 
