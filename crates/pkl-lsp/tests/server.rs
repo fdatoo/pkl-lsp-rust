@@ -651,6 +651,423 @@ async fn completion_on_member_and_top_level() {
     let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
 }
 
+#[tokio::test]
+async fn completion_inside_import_string_offers_workspace_files() {
+    use tempfile::tempdir;
+
+    // Workspace layout:
+    //   $ROOT/main.pkl     (the file the cursor sits in)
+    //   $ROOT/sibling.pkl  (a workspace candidate)
+    //   $ROOT/sub/leaf.pkl (a descended candidate)
+    let root = tempdir().unwrap();
+    let main_path = root.path().join("main.pkl");
+    let sibling_path = root.path().join("sibling.pkl");
+    let leaf_path = root.path().join("sub/leaf.pkl");
+    std::fs::create_dir_all(root.path().join("sub")).unwrap();
+    let main_src = "import \"sib\"\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    std::fs::write(&sibling_path, "x: Int = 1\n").unwrap();
+    std::fs::write(&leaf_path, "y: Int = 2\n").unwrap();
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+
+    let root_uri = format!("file://{}", root.path().display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": root_uri,
+                "capabilities": {},
+                "workspaceFolders": [{
+                    "uri": root_uri,
+                    "name": "root"
+                }]
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    let main_uri = format!("file://{}", main_path.display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": main_uri,
+                "languageId": "pkl",
+                "version": 1,
+                "text": main_src
+            }}
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+
+    // Trigger completion with the cursor at the end of `sib` inside
+    // the import quotes. Layout:
+    //   import "sib"
+    //   012345678901
+    //   character 11 sits between `b` and the closing quote.
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 0, "character": 11}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"sibling.pkl"),
+        "expected sibling.pkl in {:?}",
+        labels
+    );
+
+    // Verify `sibling.pkl` carries the correct text_edit and filter_text.
+    let sibling_item = items
+        .iter()
+        .find(|i| i["label"] == "sibling.pkl")
+        .expect("sibling completion item");
+    assert_eq!(sibling_item["filterText"], "sibling.pkl");
+    assert_eq!(sibling_item["textEdit"]["newText"], "sibling.pkl");
+    // Replace from inside the opening quote (column 8) to current cursor (11).
+    assert_eq!(sibling_item["textEdit"]["range"]["start"]["character"], 8);
+    assert_eq!(sibling_item["textEdit"]["range"]["end"]["character"], 11);
+    assert_eq!(sibling_item["kind"], 17); // 17 = File in LSP.
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_at_empty_import_string_lists_all_candidates() {
+    use tempfile::tempdir;
+
+    let root = tempdir().unwrap();
+    let main_path = root.path().join("main.pkl");
+    let a_path = root.path().join("alpha.pkl");
+    let b_path = root.path().join("beta.pkl");
+    let main_src = "import \"\"\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    std::fs::write(&a_path, "x: Int = 1\n").unwrap();
+    std::fs::write(&b_path, "y: Int = 2\n").unwrap();
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+    let root_uri = format!("file://{}", root.path().display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": root_uri,
+                "capabilities": {},
+                "workspaceFolders": [{"uri": root_uri, "name": "root"}]
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    let main_uri = format!("file://{}", main_path.display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": main_uri,
+                "languageId": "pkl",
+                "version": 1,
+                "text": main_src
+            }}
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+
+    // `import ""` — cursor inside empty string at column 8.
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 0, "character": 8}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    // alpha.pkl and beta.pkl from the workspace scan plus `pkl:`
+    // modules as fallback.
+    assert!(labels.contains(&"alpha.pkl"), "got {:?}", labels);
+    assert!(labels.contains(&"beta.pkl"), "got {:?}", labels);
+    assert!(
+        labels.iter().any(|l| l.starts_with("pkl:")),
+        "expected pkl: modules in fallback, got {:?}",
+        labels
+    );
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_pkl_import_unchanged() {
+    // Regression guard: `pkl:` imports keep emitting stdlib labels
+    // exactly as before.
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                "params":{"processId":null,"rootUri":null,"capabilities":{}}}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+
+    let src = "import \"pkl:\"\n";
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": "file:///tmp/pkl-import.pkl",
+                "languageId": "pkl",
+                "version": 1,
+                "text": src
+            }}
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+
+    // `import "pkl:` — cursor at column 12 (between `:` and `"`).
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/pkl-import.pkl"},
+                "position": {"line": 0, "character": 12}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    // Every item is a `pkl:` module; none carry a textEdit (the legacy
+    // branch leaves replacement up to the editor's word-completion).
+    assert!(!labels.is_empty(), "expected pkl: modules");
+    assert!(
+        labels.iter().all(|l| l.starts_with("pkl:")),
+        "expected only pkl: items, got {:?}",
+        labels
+    );
+    assert!(
+        items.iter().all(|i| i.get("textEdit").is_none()),
+        "expected no textEdit on stdlib branch, got {:?}",
+        items
+    );
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_after_workspace_folder_removed_returns_empty() {
+    use tempfile::tempdir;
+    // Simulate the workspace going away at runtime: we initialise the
+    // server with a tempdir, drop the tempdir, then verify completion
+    // doesn't panic and returns no workspace-file candidates.
+    let main_src = "import \"\"\n";
+    let main_uri_dir = tempdir().unwrap();
+    let main_path = main_uri_dir.path().join("main.pkl");
+    std::fs::write(&main_path, main_src).unwrap();
+
+    let throwaway_dir = tempdir().unwrap();
+    let throwaway_root = throwaway_dir.path().to_path_buf();
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+    let throwaway_uri = format!("file://{}", throwaway_root.display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": throwaway_uri,
+                "capabilities": {},
+                "workspaceFolders": [{"uri": throwaway_uri, "name": "root"}]
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    // Drop the workspace root before opening any document.
+    drop(throwaway_dir);
+
+    let main_uri = format!("file://{}", main_path.display());
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": main_uri,
+                "languageId": "pkl",
+                "version": 1,
+                "text": main_src
+            }}
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 0, "character": 8}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    // No workspace files survived. `did_open` adds the current document
+    // itself to the index, so the only candidate it would have offered
+    // is filtered out by `completions_for`. The stdlib fallback still
+    // surfaces `pkl:` items though.
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.iter().all(|l| l.starts_with("pkl:")),
+        "expected only pkl: fallback after workspace dropped, got {:?}",
+        labels
+    );
+
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
 async fn send(writer: &mut DuplexStream, value: &Value) {
     let body = serde_json::to_string(value).unwrap();
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
