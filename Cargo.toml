@@ -20,7 +20,7 @@ pkl-analyze = { path = "crates/pkl-analyze" }
 pkl-stdlib = { path = "crates/pkl-stdlib" }
 
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
