@@ -168,3 +168,75 @@ fn unresolved_identifier_is_not_recorded() {
     let offset = offset_of(src, "undefined_thing");
     assert!(r.symbol_at_offset(offset).is_none());
 }
+
+#[test]
+fn ident_inside_string_interpolation_resolves_to_property() {
+    // The `name` identifier inside `"hi \(name)"` should resolve to the
+    // property declaration on the line above.
+    let src = "name: String = \"alice\"\ngreeting = \"hi \\(name)!\"\n";
+    let r = resolve(src);
+    let name_sym = r
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymbolKind::Property))
+        .expect("name property registered");
+    // Offset of the `name` token *inside* the interpolation hole, not the
+    // declaration. `rfind` lands on the hole occurrence.
+    let interp_offset = src.rfind("name").unwrap() as u32;
+    let resolved = r
+        .symbol_at_offset(interp_offset)
+        .expect("hole identifier should resolve");
+    assert_eq!(resolved, name_sym.id);
+}
+
+#[test]
+fn let_binding_visible_inside_interpolation_hole() {
+    // The `y` inside `"\(y)"` should resolve to the let-binding.
+    let src = "x = let (y = 1) \"y is \\(y)\"\n";
+    let r = resolve(src);
+    let y_let = r
+        .symbols
+        .iter()
+        .find(|s| s.name == "y" && matches!(s.kind, SymbolKind::LetBinding))
+        .expect("let binding registered");
+    let interp_offset = src.rfind('y').unwrap() as u32;
+    let resolved = r
+        .symbol_at_offset(interp_offset)
+        .expect("hole identifier resolves");
+    assert_eq!(resolved, y_let.id);
+}
+
+#[test]
+fn ident_inside_custom_delim_interpolation_resolves() {
+    // Custom-delimited 1-hash string: interpolation marker is `\#(`.
+    let src = "name: String = \"alice\"\nx = #\"hi \\#(name)!\"#\n";
+    let r = resolve(src);
+    let name_sym = r
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymbolKind::Property))
+        .expect("name property registered");
+    let interp_offset = src.rfind("name").unwrap() as u32;
+    let resolved = r
+        .symbol_at_offset(interp_offset)
+        .expect("hole identifier resolves");
+    assert_eq!(resolved, name_sym.id);
+}
+
+#[test]
+fn ident_inside_multiline_interpolation_resolves() {
+    // A triple-quoted multiline string with an interpolation should
+    // resolve the inner identifier just like the single-line case.
+    let src = "name: String = \"alice\"\nx = \"\"\"\nhi \\(name)\n\"\"\"\n";
+    let r = resolve(src);
+    let name_sym = r
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymbolKind::Property))
+        .expect("name property registered");
+    let interp_offset = src.rfind("name").unwrap() as u32;
+    let resolved = r
+        .symbol_at_offset(interp_offset)
+        .expect("hole identifier resolves");
+    assert_eq!(resolved, name_sym.id);
+}

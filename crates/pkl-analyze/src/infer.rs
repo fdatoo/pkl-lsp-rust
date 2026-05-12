@@ -914,6 +914,17 @@ impl Inferrer<'_> {
         let span = expr_span(expr);
         let ty = match expr {
             Expr::Literal(lit) => self.infer_literal(lit),
+            Expr::InterpolatedString(s) => {
+                // Walk each hole so the inner expressions get typed and so
+                // member-references inside them are recorded. The string
+                // itself is always `String`.
+                for hole in s.interpolations() {
+                    if let Some(inner) = hole.expr() {
+                        let _ = self.infer_expr(&inner);
+                    }
+                }
+                Ty::Str
+            }
             Expr::Ident(id) => {
                 if let Some(kind) = id.special() {
                     match kind {

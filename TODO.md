@@ -12,12 +12,20 @@ Legend:
 
 ## Lexer / Parser (`pkl-syntax`)
 
-- [-] **String interpolation tokens.** `"\(expr)"` is still emitted as one
-  `String` token; the parser doesn't see the embedded expressions, so
-  hover/goto inside an interpolation can't work. Deferred: requires a
-  stateful re-entrant lexer and a new AST shape.
-- [-] **Custom-delimited string interpolation.** Same as above for
-  `#"...#\(expr)..."#`.
+- [x] **String interpolation tokens.** Interpolated strings are
+  decomposed by a mode-stack-driven lexer into `StringQuoteOpen`,
+  `StringPart` / `MultilineStringPart`, `InterpolationStart`/`End`, and
+  `StringQuoteClose` tokens; the parser wraps these into
+  `InterpolatedString` / `InterpolatedMultilineString` nodes with one
+  `Interpolation` child per `\(...)` hole. The resolver descends into
+  each hole's expression so identifiers resolve against the surrounding
+  scope, and the inferrer types the whole string as `Ty::Str` while
+  still recording types for every inner expression. Strings without
+  interpolation keep the legacy single-token shape for backward
+  compatibility.
+- [x] **Custom-delimited string interpolation.** Same as above for
+  `#"...\#(expr)..."#` (and N-hash variants). Hash count rides on the
+  opening marker; the closing fence is a plain `)`.
 - [x] **Doc-comment recovery for leading trivia.** `cst::doc_comment_for`
   walks the leading-trivia children of a `SyntaxNode` so consumers can
   recover the doc comment for any declaration on demand.
@@ -37,6 +45,15 @@ Legend:
   both curated and mutated/random inputs. The formatter, analyzer,
   LSP feature handlers, and stdlib scraper all consume the lossless
   tree — there is no longer a separate owned AST.
+- [x] **Error recovery for mid-typing partial expressions.** Trailing
+  `foo.`, `foo(`, `foo[`, `let (x = …)`, `if (…)`, `new T {`, `foo {`,
+  and `name: T = …` now each produce the expected outer CST node
+  (`MemberExpr`, `CallExpr`, `IndexExpr`, `LetExpr`, `IfExpr`,
+  `NewExpr`, `AmendsExpr`, `PropertyDecl`) with `Error` placeholders
+  in the missing-child slots and a single, short diagnostic — keeping
+  completion, signature-help, and hover working at the exact moment
+  the user is mid-keystroke. Cascading "found end of file"
+  expectations are collapsed to the first one.
 
 ## Resolver / Symbol table (`pkl-analyze::resolver`)
 
@@ -138,9 +155,19 @@ Legend:
   candidates outrank descendants which outrank parent-jumps. `did_open`
   and `did_change_watched_files` keep the index in sync.
 - [x] **References (`textDocument/references`).**
-- [x] **Rename (`textDocument/rename` + `prepareRename`).** Cross-file
-  rename still future work — would need a multi-file `WorkspaceEdit`
-  builder consuming the graph's dependents index.
+- [x] **Workspace-wide find-references.** `textDocument/references` now
+  follows imports: for a top-level user symbol, every dependent module's
+  `MemberRef` set is walked through the graph and matching `alias.<name>`
+  sites become `Location`s. Stdlib symbols and import aliases stay
+  local-only.
+- [x] **Rename (`textDocument/rename` + `prepareRename`).**
+- [x] **Workspace-wide rename.** `textDocument/rename` builds a multi-
+  file `WorkspaceEdit` via the new `ModuleGraph::references_to` helper,
+  emitting edits in every dependent module that accesses the symbol
+  through an import alias. Import aliases stay local, stdlib symbols
+  remain refused. Open dependents go through their `Document` rope;
+  unopened dependents fall back to the graph's cached source string for
+  UTF-16-correct range computation.
 - [x] **Workspace symbols.** Aggregated from every module in the graph.
 - [x] **Signature help.** Active parameter from comma-counting.
 - [x] **Code actions.** "Annotate `name: Type`" quick-fix for
@@ -174,8 +201,8 @@ Legend:
 - [x] **Release artifacts.** `.github/workflows/release.yml`
   cross-compiles `pkl-lsp` for x86_64 / aarch64 Linux + macOS and
   x86_64 Windows on every `v*` tag and publishes a GitHub release.
-- [-] **`pkl:` stdlib bundling.** Resolved — vendored `.pkl` files
-  shipped via `include_str!` (see `crates/pkl-stdlib/vendor/`).
+- [x] **`pkl:` stdlib bundling.** Vendored `.pkl` files shipped via
+  `include_str!` (see `crates/pkl-stdlib/vendor/`).
 
 ## Documentation
 
@@ -213,7 +240,6 @@ walks `cst::*` directly.
 ---
 
 Every actionable item above the migration list has been worked
-through. The remaining `[-]` entries are deferred by design (string
-interpolation, stdlib type-parameter symbols, transitive graph
-invalidation) with short rationales attached. Strike or add items as
-they land or emerge.
+through. The remaining `[-]` entries are deferred by design (stdlib
+type-parameter symbols, transitive graph invalidation) with short
+rationales attached. Strike or add items as they land or emerge.

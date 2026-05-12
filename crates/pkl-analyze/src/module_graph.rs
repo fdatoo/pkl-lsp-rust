@@ -20,8 +20,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pkl_syntax::parse;
+use pkl_syntax::span::Span;
 
 use crate::loader::{ModuleLoader, ModuleUri};
+use crate::symbols::SymbolKind;
 use crate::{analyze, Analysis};
 
 /// One module known to the graph.
@@ -244,6 +246,77 @@ impl ModuleGraph {
         Some(len)
     }
 
+    /// Every cross-module reference to `target_uri::target_symbol_name` —
+    /// i.e. every `alias.<member>` member-access in a dependent module
+    /// where `alias` resolves through an import to `target_uri` and the
+    /// accessed member name equals `target_symbol_name`.
+    ///
+    /// Returns `(ModuleUri, Span)` pairs. The `Span` points at the member
+    /// name token in the referring module (not the receiver alias). Callers
+    /// that need a UTF-16 LSP `Range` are responsible for mapping the span
+    /// through the referring module's rope / source.
+    ///
+    /// Walks direct dependents only — Pkl has no re-export syntax, so a
+    /// module can only reference `target_uri`'s members if it directly
+    /// imports `target_uri`. Cycles are therefore inherently safe; we also
+    /// guard against visiting the same dependent twice if multiple aliases
+    /// in it import the same target.
+    pub fn references_to(
+        &self,
+        target_uri: &str,
+        target_symbol_name: &str,
+    ) -> Vec<(ModuleUri, Span)> {
+        let mut out: Vec<(ModuleUri, Span)> = Vec::new();
+        let mut visited: HashSet<&str> = HashSet::new();
+        for dependent in self.modules.values() {
+            // Collect every local alias in this module that imports
+            // `target_uri`. A dependent may import the same module under
+            // multiple aliases (rare but legal); each alias contributes
+            // its own reference sites.
+            let aliases: Vec<&str> = dependent
+                .import_targets
+                .iter()
+                .filter_map(|(local, target)| {
+                    if target == target_uri {
+                        Some(local.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if aliases.is_empty() {
+                continue;
+            }
+            if !visited.insert(dependent.uri.as_str()) {
+                continue;
+            }
+            let resolution = &dependent.analysis.resolution;
+            let inference = &dependent.analysis.inference;
+            for member_ref in inference.member_refs.values() {
+                if member_ref.member_name != target_symbol_name {
+                    continue;
+                }
+                // The receiver must resolve to an Import symbol whose
+                // local name matches one of the aliases we collected.
+                let Some(recv_sym_id) = resolution
+                    .by_span_start
+                    .get(&member_ref.receiver_span.start)
+                else {
+                    continue;
+                };
+                let recv_sym = resolution.symbol(*recv_sym_id);
+                if !matches!(recv_sym.kind, SymbolKind::Import { .. }) {
+                    continue;
+                }
+                if !aliases.contains(&recv_sym.name.as_str()) {
+                    continue;
+                }
+                out.push((dependent.uri.clone(), member_ref.member_name_span));
+            }
+        }
+        out
+    }
+
     /// Look up a top-level declaration named `member_name` in `module`.
     /// Returns the symbol so callers can fetch its hover info and span.
     pub fn lookup_top_level<'a>(
@@ -382,6 +455,93 @@ mod tests {
         // what the loader actually inserted.
         let b_uri = path_to_uri(&b.canonicalize().unwrap());
         assert!(graph.get(&b_uri).is_some());
+    }
+
+    #[test]
+    fn references_to_collects_cross_module_member_refs() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.pkl");
+        let b = dir.path().join("b.pkl");
+        std::fs::write(&a, "class MyClass { name: String }\n").unwrap();
+        std::fs::write(
+            &b,
+            "import \"./a.pkl\" as a\nx = a.MyClass\ny = a.MyClass\n",
+        )
+        .unwrap();
+
+        let mut graph = ModuleGraph::new(loader_with_namespaces(Map::new()));
+        let a_uri = format!("file://{}", a.canonicalize().unwrap().display());
+        let b_uri = format!("file://{}", b.display());
+        let b_src = std::fs::read_to_string(&b).unwrap();
+        graph.upsert(b_uri.clone(), b_src.clone(), true);
+
+        // a.pkl loads transitively; sanity-check it's there.
+        assert!(graph.get(&a_uri).is_some(), "a.pkl should be in graph");
+
+        let refs = graph.references_to(&a_uri, "MyClass");
+        assert_eq!(
+            refs.len(),
+            2,
+            "expected two refs to MyClass, got {:?}",
+            refs
+        );
+        for (uri, span) in &refs {
+            // Each ref lives in b.pkl and the span points at "MyClass".
+            assert!(uri.contains("b.pkl"), "ref uri: {}", uri);
+            let text = &b_src[span.start as usize..span.end as usize];
+            assert_eq!(text, "MyClass");
+        }
+    }
+
+    #[test]
+    fn references_to_handles_cyclic_imports() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.pkl");
+        let b = dir.path().join("b.pkl");
+        std::fs::write(
+            &a,
+            "import \"./b.pkl\" as b\nclass Top { name: String }\nz = b.Bottom\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &b,
+            "import \"./a.pkl\" as a\nclass Bottom { age: Int }\nq = a.Top\n",
+        )
+        .unwrap();
+
+        let mut graph = ModuleGraph::new(loader_with_namespaces(Map::new()));
+        let a_uri = format!("file://{}", a.display());
+        let a_src = std::fs::read_to_string(&a).unwrap();
+        graph.upsert(a_uri.clone(), a_src, true);
+
+        let a_canon = path_to_uri(&a.canonicalize().unwrap());
+        // The search must terminate even though the graph is cyclic.
+        let refs_to_top = graph.references_to(&a_canon, "Top");
+        assert_eq!(refs_to_top.len(), 1, "got: {:?}", refs_to_top);
+    }
+
+    #[test]
+    fn references_to_ignores_unrelated_imports() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.pkl");
+        let other = dir.path().join("other.pkl");
+        let b = dir.path().join("b.pkl");
+        std::fs::write(&a, "class MyClass {}\n").unwrap();
+        std::fs::write(&other, "class MyClass {}\n").unwrap();
+        std::fs::write(&b, "import \"./other.pkl\" as o\nx = o.MyClass\n").unwrap();
+
+        let mut graph = ModuleGraph::new(loader_with_namespaces(Map::new()));
+        let b_uri = format!("file://{}", b.display());
+        let b_src = std::fs::read_to_string(&b).unwrap();
+        graph.upsert(b_uri, b_src, true);
+
+        let a_uri = path_to_uri(&a.canonicalize().unwrap());
+        let refs = graph.references_to(&a_uri, "MyClass");
+        assert!(
+            refs.is_empty(),
+            "expected no refs to a.pkl::MyClass, got {:?}",
+            refs
+        );
     }
 
     #[test]
