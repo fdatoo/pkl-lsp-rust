@@ -283,6 +283,34 @@ fn lexes_nested_parens_inside_interpolation() {
 }
 
 #[test]
+fn lexes_interpolated_multiline_pieces() {
+    // The simplest interpolated multi-line string: open triple-quote,
+    // newline, interpolation hole, newline, close triple-quote.
+    let src = "\"\"\"\n\\(x)\n\"\"\"";
+    let pieces = kinds(src);
+    assert_eq!(
+        pieces,
+        vec![
+            SyntaxKind::StringQuoteOpen,
+            SyntaxKind::MultilineStringPart,
+            SyntaxKind::InterpolationStart,
+            SyntaxKind::Ident,
+            SyntaxKind::InterpolationEnd,
+            SyntaxKind::MultilineStringPart,
+            SyntaxKind::StringQuoteClose,
+            SyntaxKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn plain_multiline_string_stays_single_token_without_interpolation() {
+    // No `\(` -> the legacy single-token path should still apply.
+    let pieces = kinds("\"\"\"\nhello world\n\"\"\"");
+    assert_eq!(pieces, vec![SyntaxKind::MultilineString, SyntaxKind::Eof]);
+}
+
+#[test]
 fn lexes_nested_string_inside_interpolation() {
     // `"\("x")"` — a string holding an interpolation that itself wraps a
     // nested string. The inner `"x"` does not contain `\(` so it should

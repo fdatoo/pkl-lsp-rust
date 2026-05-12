@@ -1156,4 +1156,11 @@ mod tests {
         let out = format_str(src);
         assert_eq!(out, "x = \"a\\(\"b\")c\"\n");
     }
+
+    #[test]
+    fn formats_interpolated_multiline_string() {
+        let src = "x = \"\"\"\nhello \\(name)\nworld\n\"\"\"\n";
+        let out = format_str(src);
+        assert_eq!(out, src);
+    }
 }

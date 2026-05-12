@@ -1524,6 +1524,24 @@ mod tests {
     }
 
     #[test]
+    fn rt_interpolated_multiline_string() {
+        round_trip("x = \"\"\"\nhello \\(name)\nworld\n\"\"\"\n");
+    }
+
+    #[test]
+    fn interpolated_multiline_builds_node() {
+        let parsed = parse_green("x = \"\"\"\n\\(name)\n\"\"\"\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut saw_multi = false;
+        for desc in parsed.syntax.descendants() {
+            if desc.kind() == SyntaxKind::InterpolatedMultilineString {
+                saw_multi = true;
+            }
+        }
+        assert!(saw_multi, "expected InterpolatedMultilineString node");
+    }
+
+    #[test]
     fn module_node_root() {
         let parsed = parse_green("x = 1\n");
         assert_eq!(parsed.syntax.kind(), SyntaxKind::Module);
