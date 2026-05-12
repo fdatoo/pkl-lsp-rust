@@ -1,0 +1,34 @@
+[package]
+name = "pkl-lsp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pkl-syntax = { path = "../crates/pkl-syntax" }
+pkl-analyze = { path = "../crates/pkl-analyze" }
+
+# Prevent this crate from being part of the default workspace build —
+# `cargo +nightly fuzz` will pick it up explicitly via its own commands.
+[workspace]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "analyze"
+path = "fuzz_targets/analyze.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

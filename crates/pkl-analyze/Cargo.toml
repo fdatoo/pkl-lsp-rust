@@ -1,0 +1,31 @@
+[package]
+name = "pkl-analyze"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Semantic analysis (resolver, type checker) for Pkl."
+
+[features]
+default = []
+# Enable HTTPS/HTTP imports via a synchronous client. Off by default so
+# the analyzer crate stays dependency-light. Editor builds that opt in
+# pull in `ureq` and gain a `RemoteLoader`.
+remote = ["dep:ureq"]
+
+[dependencies]
+pkl-syntax = { workspace = true }
+pkl-stdlib = { workspace = true }
+thiserror = { workspace = true }
+glob = { workspace = true }
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+
+[[bench]]
+name = "analyze"
+harness = false
+

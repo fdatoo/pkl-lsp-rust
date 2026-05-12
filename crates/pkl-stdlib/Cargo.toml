@@ -1,0 +1,11 @@
+[package]
+name = "pkl-stdlib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model of the Pkl standard library used by the analyzer."
+
+[dependencies]
+pkl-syntax = { workspace = true }

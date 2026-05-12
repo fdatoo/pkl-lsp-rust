@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pkl-syntax",
+    "crates/pkl-analyze",
+    "crates/pkl-stdlib",
+    "crates/pkl-lsp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/fdatoo/pkl-lsp-rust"
+
+[workspace.dependencies]
+pkl-syntax = { path = "crates/pkl-syntax" }
+pkl-analyze = { path = "crates/pkl-analyze" }
+pkl-stdlib = { path = "crates/pkl-stdlib" }
+
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "time"] }
+tower-lsp = "0.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "5"
+ropey = "1"
+glob = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
