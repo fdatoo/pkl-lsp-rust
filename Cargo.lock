@@ -156,6 +156,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "countme"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
+
+[[package]]
 name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,6 +651,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -763,6 +778,7 @@ name = "pkl-syntax"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rowan",
  "thiserror",
  "unicode-ident",
 ]
@@ -871,6 +887,25 @@ dependencies = [
  "smallvec",
  "str_indices",
 ]
+
+[[package]]
+name = "rowan"
+version = "0.15.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62f509095fc8cc0c8c8564016771d458079c11a8d857e65861f045145c0d3208"
+dependencies = [
+ "countme",
+ "hashbrown 0.14.5",
+ "memoffset",
+ "rustc-hash",
+ "text-size",
+]
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustix"
@@ -1074,6 +1109,12 @@ dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "text-size"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 
 [[package]]
 name = "thiserror"

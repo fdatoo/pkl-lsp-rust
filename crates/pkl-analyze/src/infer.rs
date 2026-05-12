@@ -1,6 +1,6 @@
 //! Single-pass type inference for Pkl expressions.
 //!
-//! The inferrer walks the AST and assigns a [`Ty`] to every expression and
+//! The inferrer walks the CST and assigns a [`Ty`] to every expression and
 //! property/method body. It also resolves member access against the stdlib
 //! catalogue, producing a [`MemberRef`] entry the LSP can use for hover and
 //! goto-definition on `expr.name` forms.
@@ -12,9 +12,13 @@
 use std::collections::{HashMap, HashSet};
 
 use pkl_stdlib::{StdlibMember, StdlibType};
-use pkl_syntax::ast::*;
+use pkl_syntax::cst::{
+    self, ident_text, significant_span, token_span, AstNode, BinaryOp, ClassMember, Expr, Item,
+    LiteralExpr, LiteralKind, MethodDecl, Module, ObjectBody, ObjectMember, Parameter,
+    PropertyDecl, PropertyValue, QualifiedName, ReadKind, SpecialIdentKind, Type, UnaryOp,
+};
 use pkl_syntax::span::Span;
-use pkl_syntax::SyntaxDiagnostic;
+use pkl_syntax::{SyntaxDiagnostic, SyntaxToken};
 
 use crate::resolver::Resolution;
 use crate::subtyping::is_subtype;
@@ -151,35 +155,36 @@ impl Inferrer<'_> {
     }
 
     fn walk_module(&mut self, module: &Module) {
-        for item in &module.items {
-            self.walk_item(item);
+        for item in module.items() {
+            self.walk_item(&item);
         }
     }
 
     fn walk_item(&mut self, item: &Item) {
         match item {
             Item::Class(c) => {
-                self.walk_annotations(&c.annotations);
-                if let Some(ext) = &c.extends {
-                    self.walk_type(ext);
+                self.walk_annotations_node(c.annotations());
+                if let Some(ext) = c.extends() {
+                    self.walk_type(&ext);
                 }
-                if let Some(body) = &c.body {
-                    let class_id = find_user_class(self.resolution, &c.name.name);
+                if let Some(body) = c.body() {
+                    let class_name = c.name().map(|t| ident_text(&t)).unwrap_or_default();
+                    let class_id = find_user_class(self.resolution, &class_name);
                     let prev_class = self.current_class.take();
                     self.current_class = class_id.or(prev_class);
-                    for m in &body.members {
+                    for m in body.members() {
                         match m {
-                            ClassMember::Property(p) => self.walk_property(p),
-                            ClassMember::Method(m) => self.walk_method(m),
+                            ClassMember::Property(p) => self.walk_class_property(&p),
+                            ClassMember::Method(m) => self.walk_class_method(&m),
                         }
                     }
                     self.current_class = prev_class;
                 }
             }
             Item::TypeAlias(t) => {
-                self.walk_annotations(&t.annotations);
-                if let Some(aliased) = &t.aliased {
-                    self.walk_type(aliased);
+                self.walk_annotations_node(t.annotations());
+                if let Some(aliased) = t.aliased_type() {
+                    self.walk_type(&aliased);
                 }
             }
             Item::Property(p) => self.walk_property(p),
@@ -189,33 +194,102 @@ impl Inferrer<'_> {
     }
 
     fn walk_property(&mut self, p: &PropertyDecl) {
-        self.walk_annotations(&p.annotations);
-        let expected = p.ty.as_ref().map(Ty::from_type_ref);
-        if let Some(ty) = &p.ty {
-            self.walk_type(ty);
+        self.walk_annotations_node(p.annotations());
+        let expected = p.ty().as_ref().map(Ty::from_cst_type);
+        if let Some(ty) = p.ty() {
+            self.walk_type(&ty);
         }
         let prev = self.expected_context.take();
         self.expected_context = expected.clone();
-        match &p.value {
+        let name_span = name_span_or_empty(p.name());
+        let name_text = name_token_text(p.name());
+        match p.value() {
             Some(PropertyValue::Expr(e)) => {
-                let actual = self.infer_expr(e);
+                let actual = self.infer_expr(&e);
                 if let Some(exp) = &expected {
-                    self.check_assignable(exp, &actual, e.span(), &p.name.name);
+                    self.check_assignable(exp, &actual, expr_span(&e), &name_text);
                 }
                 // Cache the inferred value type for unannotated properties
                 // so later references can resolve into it.
                 if expected.is_none() && !matches!(actual, Ty::Unknown) {
-                    if let Some(sym_id) = self
-                        .resolution
-                        .by_span_start
-                        .get(&p.name.span.start)
-                        .copied()
+                    if let Some(sym_id) =
+                        self.resolution.by_span_start.get(&name_span.start).copied()
                     {
                         self.inferred_property_types.insert(sym_id, actual);
                     }
                 }
             }
-            Some(PropertyValue::ObjectBody(body)) => self.walk_object_body(body, expected.as_ref()),
+            Some(PropertyValue::ObjectBody(body)) => {
+                self.walk_object_body(&body, expected.as_ref())
+            }
+            None => {}
+        }
+        self.expected_context = prev;
+    }
+
+    fn walk_class_property(&mut self, p: &cst::ClassPropertyDecl) {
+        self.walk_annotations_node(p.annotations());
+        let expected = p.ty().as_ref().map(Ty::from_cst_type);
+        if let Some(ty) = p.ty() {
+            self.walk_type(&ty);
+        }
+        let prev = self.expected_context.take();
+        self.expected_context = expected.clone();
+        let name_span = name_span_or_empty(p.name());
+        let name_text = name_token_text(p.name());
+        match p.value() {
+            Some(PropertyValue::Expr(e)) => {
+                let actual = self.infer_expr(&e);
+                if let Some(exp) = &expected {
+                    self.check_assignable(exp, &actual, expr_span(&e), &name_text);
+                }
+                if expected.is_none() && !matches!(actual, Ty::Unknown) {
+                    if let Some(sym_id) =
+                        self.resolution.by_span_start.get(&name_span.start).copied()
+                    {
+                        self.inferred_property_types.insert(sym_id, actual);
+                    }
+                }
+            }
+            Some(PropertyValue::ObjectBody(body)) => {
+                self.walk_object_body(&body, expected.as_ref())
+            }
+            None => {}
+        }
+        self.expected_context = prev;
+    }
+
+    fn walk_object_property(&mut self, p: &cst::ObjectProperty, expected: Option<&Ty>) {
+        if let Some(expected_ty) = expected {
+            self.record_object_member(p, expected_ty);
+        }
+        // Then recurse with the property's own declared type, if any.
+        self.walk_annotations_node(p.annotations());
+        let declared = p.ty().as_ref().map(Ty::from_cst_type);
+        if let Some(ty) = p.ty() {
+            self.walk_type(&ty);
+        }
+        let prev = self.expected_context.take();
+        self.expected_context = declared.clone();
+        let name_span = name_span_or_empty(p.name());
+        let name_text = name_token_text(p.name());
+        match p.value() {
+            Some(PropertyValue::Expr(e)) => {
+                let actual = self.infer_expr(&e);
+                if let Some(exp) = &declared {
+                    self.check_assignable(exp, &actual, expr_span(&e), &name_text);
+                }
+                if declared.is_none() && !matches!(actual, Ty::Unknown) {
+                    if let Some(sym_id) =
+                        self.resolution.by_span_start.get(&name_span.start).copied()
+                    {
+                        self.inferred_property_types.insert(sym_id, actual);
+                    }
+                }
+            }
+            Some(PropertyValue::ObjectBody(body)) => {
+                self.walk_object_body(&body, declared.as_ref())
+            }
             None => {}
         }
         self.expected_context = prev;
@@ -240,22 +314,81 @@ impl Inferrer<'_> {
     }
 
     fn walk_method(&mut self, m: &MethodDecl) {
-        self.walk_annotations(&m.annotations);
-        for p in &m.parameters {
-            if let Some(ty) = &p.ty {
-                self.walk_type(ty);
+        self.walk_annotations_node(m.annotations());
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.walk_type(&ty);
             }
         }
-        if let Some(ret) = &m.return_type {
-            self.walk_type(ret);
+        if let Some(ret) = m.return_type() {
+            self.walk_type(&ret);
         }
-        let expected = m.return_type.as_ref().map(Ty::from_type_ref);
+        let expected = m.return_type().as_ref().map(Ty::from_cst_type);
         let prev = self.expected_context.take();
         self.expected_context = expected.clone();
-        if let Some(body) = &m.body {
-            let actual = self.infer_expr(body);
+        let name_text = name_token_text(m.name());
+        if let Some(body) = m.body() {
+            let actual = self.infer_expr(&body);
             if let Some(exp) = &expected {
-                self.check_assignable(exp, &actual, body.span(), &m.name.name);
+                self.check_assignable(exp, &actual, expr_span(&body), &name_text);
+            }
+        }
+        self.expected_context = prev;
+    }
+
+    fn walk_class_method(&mut self, m: &cst::ClassMethodDecl) {
+        self.walk_annotations_node(m.annotations());
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.walk_type(&ty);
+            }
+        }
+        if let Some(ret) = m.return_type() {
+            self.walk_type(&ret);
+        }
+        let expected = m.return_type().as_ref().map(Ty::from_cst_type);
+        let prev = self.expected_context.take();
+        self.expected_context = expected.clone();
+        let name_text = name_token_text(m.name());
+        if let Some(body) = m.body() {
+            let actual = self.infer_expr(&body);
+            if let Some(exp) = &expected {
+                self.check_assignable(exp, &actual, expr_span(&body), &name_text);
+            }
+        }
+        self.expected_context = prev;
+    }
+
+    fn walk_object_method(&mut self, m: &cst::ObjectMethod) {
+        self.walk_annotations_node(m.annotations());
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.walk_type(&ty);
+            }
+        }
+        if let Some(ret) = m.return_type() {
+            self.walk_type(&ret);
+        }
+        let expected = m.return_type().as_ref().map(Ty::from_cst_type);
+        let prev = self.expected_context.take();
+        self.expected_context = expected.clone();
+        let name_text = name_token_text(m.name());
+        if let Some(body) = m.body() {
+            let actual = self.infer_expr(&body);
+            if let Some(exp) = &expected {
+                self.check_assignable(exp, &actual, expr_span(&body), &name_text);
             }
         }
         self.expected_context = prev;
@@ -265,31 +398,40 @@ impl Inferrer<'_> {
     /// qualified names. `acme.Foo` becomes a member ref pinned to the
     /// `Foo` segment whose receiver is the import alias `acme`; the LSP
     /// layer routes that through the module graph for hover and goto.
-    fn walk_type(&mut self, ty: &TypeRef) {
+    fn walk_type(&mut self, ty: &Type) {
         match ty {
-            TypeRef::Named {
-                name, arguments, ..
-            } => {
-                self.record_qualified_member_ref(name);
-                for a in arguments {
-                    self.walk_type(a);
+            Type::Named(n) => {
+                if let Some(name) = n.name() {
+                    self.record_qualified_member_ref(&name);
+                }
+                if let Some(args) = n.type_arguments() {
+                    for a in args.arguments() {
+                        self.walk_type(&a);
+                    }
                 }
             }
-            TypeRef::Nullable { inner, .. } | TypeRef::Parenthesized { inner, .. } => {
-                self.walk_type(inner)
-            }
-            TypeRef::Union { members, .. } => {
-                for m in members {
-                    self.walk_type(m);
+            Type::Nullable(n) => {
+                if let Some(inner) = n.inner() {
+                    self.walk_type(&inner);
                 }
             }
-            TypeRef::Function {
-                parameters, result, ..
-            } => {
-                for p in parameters {
-                    self.walk_type(p);
+            Type::Parenthesized(p) => {
+                if let Some(inner) = p.inner() {
+                    self.walk_type(&inner);
                 }
-                self.walk_type(result);
+            }
+            Type::Union(u) => {
+                for m in u.members() {
+                    self.walk_type(&m);
+                }
+            }
+            Type::Function(f) => {
+                for p in f.parameters() {
+                    self.walk_type(&p);
+                }
+                if let Some(result) = f.result() {
+                    self.walk_type(&result);
+                }
             }
             _ => {}
         }
@@ -302,16 +444,17 @@ impl Inferrer<'_> {
     fn infer_args_with_narrowing(
         &mut self,
         receiver_ty: &Ty,
-        method_name: Option<&Identifier>,
+        method_name: Option<&SyntaxToken>,
         args: &[Expr],
     ) -> Vec<Ty> {
         // Look up the parsed signature once.
         let parsed = method_name.and_then(|n| {
+            let n_text = ident_text(n);
             let receiver_unwrapped = receiver_ty.unwrap_nullable();
             let stdlib_type = receiver_unwrapped
                 .stdlib_name()
                 .and_then(pkl_stdlib::find_type)?;
-            let (member, owner) = find_member(stdlib_type, &n.name)?;
+            let (member, owner) = find_member(stdlib_type, &n_text)?;
             let parsed = parse_signature(member.signature);
             // Receiver-side substitution env: bind the owner's class
             // generics from the receiver's positional args.
@@ -333,22 +476,25 @@ impl Inferrer<'_> {
             //   - the actual arg is a lambda with at least one untyped param.
             let mut handled = false;
             if let Some((parsed, env)) = &parsed {
-                if let (Some(declared), Expr::Lambda { parameters, .. }) =
-                    (parsed.param_types.get(i), arg)
-                {
+                if let (Some(declared), Expr::Lambda(lam)) = (parsed.param_types.get(i), arg) {
                     let declared = declared.substitute(env);
                     if let Ty::Function {
                         params: declared_params,
                         ..
                     } = declared
                     {
+                        let parameters: Vec<Parameter> = lam
+                            .parameters()
+                            .map(|pl| pl.parameters().collect())
+                            .unwrap_or_default();
                         let mut saves: Vec<(SymbolId, Option<Ty>)> = Vec::new();
                         for (lp, dp) in parameters.iter().zip(declared_params.iter()) {
-                            if lp.ty.is_some() {
+                            if lp.ty().is_some() {
                                 continue;
                             }
+                            let lp_name_span = name_span_or_empty(lp.name());
                             let Some(sym_id) =
-                                self.resolution.by_span_start.get(&lp.name.span.start)
+                                self.resolution.by_span_start.get(&lp_name_span.start)
                             else {
                                 continue;
                             };
@@ -512,12 +658,10 @@ impl Inferrer<'_> {
         let iter_ty = iter_ty.unwrap_nullable();
         match (bindings.len(), iter_ty) {
             (1, Ty::List(t)) | (1, Ty::Set(t)) | (1, Ty::Listing(t)) => {
-                if let Some(sym_id) = self
-                    .resolution
-                    .by_span_start
-                    .get(&bindings[0].name.span.start)
-                {
-                    if bindings[0].ty.is_none() {
+                let binding = &bindings[0];
+                let binding_name_span = name_span_or_empty(binding.name());
+                if let Some(sym_id) = self.resolution.by_span_start.get(&binding_name_span.start) {
+                    if binding.ty().is_none() {
                         let prev = self.narrowings.insert(*sym_id, (**t).clone());
                         saves.push((*sym_id, prev));
                     }
@@ -525,12 +669,10 @@ impl Inferrer<'_> {
             }
             (1, Ty::Map(k, v)) | (1, Ty::Mapping(k, v)) => {
                 // A single binding over a Map iterates over Pair<K, V>.
-                if let Some(sym_id) = self
-                    .resolution
-                    .by_span_start
-                    .get(&bindings[0].name.span.start)
-                {
-                    if bindings[0].ty.is_none() {
+                let binding = &bindings[0];
+                let binding_name_span = name_span_or_empty(binding.name());
+                if let Some(sym_id) = self.resolution.by_span_start.get(&binding_name_span.start) {
+                    if binding.ty().is_none() {
                         let pair = Ty::Pair(Box::new((**k).clone()), Box::new((**v).clone()));
                         let prev = self.narrowings.insert(*sym_id, pair);
                         saves.push((*sym_id, prev));
@@ -540,10 +682,11 @@ impl Inferrer<'_> {
             (2, Ty::Map(k, v)) | (2, Ty::Mapping(k, v)) => {
                 let pairs: [&Ty; 2] = [k, v];
                 for (binding, ty) in bindings.iter().zip(pairs.iter().copied()) {
-                    if binding.ty.is_some() {
+                    if binding.ty().is_some() {
                         continue;
                     }
-                    let Some(sym_id) = self.resolution.by_span_start.get(&binding.name.span.start)
+                    let binding_name_span = name_span_or_empty(binding.name());
+                    let Some(sym_id) = self.resolution.by_span_start.get(&binding_name_span.start)
                     else {
                         continue;
                     };
@@ -572,14 +715,21 @@ impl Inferrer<'_> {
     /// Extract a flow narrowing from an `if` condition.
     /// `x is T` ⇒ narrow `x` to `T` inside the then-branch.
     fn extract_narrowing(&self, cond: &Expr) -> Option<(SymbolId, Ty)> {
-        let Expr::TypeCheck { operand, ty, .. } = cond else {
+        let Expr::TypeCheck(tc) = cond else {
             return None;
         };
-        let Expr::Ident(id) = operand.as_ref() else {
+        let operand = tc.operand()?;
+        let Expr::Ident(id) = operand else {
             return None;
         };
-        let sym_id = *self.resolution.by_span_start.get(&id.span.start)?;
-        Some((sym_id, Ty::from_type_ref(ty)))
+        let tok = id.token()?;
+        if id.special().is_some() {
+            return None;
+        }
+        let id_span = token_span(&tok);
+        let sym_id = *self.resolution.by_span_start.get(&id_span.start)?;
+        let ty = tc.ty()?;
+        Some((sym_id, Ty::from_cst_type(&ty)))
     }
 
     /// `Ty` of `this` inside the currently-walking class body, if any.
@@ -608,12 +758,15 @@ impl Inferrer<'_> {
     /// Register a `head.tail` qualified name as a cross-module member ref
     /// when the head resolves to an `Import` symbol in this file.
     fn record_qualified_member_ref(&mut self, name: &QualifiedName) {
-        if name.segments.len() < 2 {
+        let segs: Vec<SyntaxToken> = name.segments().collect();
+        if segs.len() < 2 {
             return;
         }
-        let head = &name.segments[0];
-        let tail = name.segments.last().unwrap();
-        let Some(sym_id) = self.resolution.by_span_start.get(&head.span.start) else {
+        let head = &segs[0];
+        let tail = segs.last().unwrap();
+        let head_span = token_span(head);
+        let tail_span = token_span(tail);
+        let Some(sym_id) = self.resolution.by_span_start.get(&head_span.start) else {
             return;
         };
         let sym = self.resolution.symbol(*sym_id);
@@ -621,12 +774,12 @@ impl Inferrer<'_> {
             return;
         }
         self.member_refs.insert(
-            tail.span.start,
+            tail_span.start,
             MemberRef {
                 receiver_ty: Ty::Module,
-                receiver_span: head.span,
-                member_name: tail.name.clone(),
-                member_name_span: tail.span,
+                receiver_span: head_span,
+                member_name: ident_text(tail),
+                member_name_span: tail_span,
                 stdlib_member: None,
                 stdlib_type: None,
                 user_class: None,
@@ -635,60 +788,72 @@ impl Inferrer<'_> {
         );
     }
 
-    fn walk_annotations(&mut self, anns: &[Annotation]) {
+    fn walk_annotations_node<I: Iterator<Item = cst::Annotation>>(&mut self, anns: I) {
         for a in anns {
-            self.record_qualified_member_ref(&a.name);
-            if let Some(body) = &a.body {
-                self.walk_object_body(body, None);
+            if let Some(name) = a.name() {
+                self.record_qualified_member_ref(&name);
+            }
+            if let Some(body) = a.body() {
+                self.walk_object_body(&body, None);
             }
         }
     }
 
     fn walk_object_body(&mut self, body: &ObjectBody, expected: Option<&Ty>) {
-        for member in &body.members {
+        for member in body.members() {
             match member {
-                ObjectMember::Property(p) => self.walk_object_property(p, expected),
-                ObjectMember::Method(m) => self.walk_method(m),
+                ObjectMember::Property(p) => self.walk_object_property(&p, expected),
+                ObjectMember::Method(m) => self.walk_object_method(&m),
                 ObjectMember::Element(e) => {
-                    self.infer_expr(e);
+                    if let Some(expr) = e.expr() {
+                        self.infer_expr(&expr);
+                    }
                 }
-                ObjectMember::Entry { key, value, .. } => {
-                    self.infer_expr(key);
-                    match value {
-                        PropertyValue::Expr(e) => {
-                            self.infer_expr(e);
+                ObjectMember::Entry(e) => {
+                    if let Some(key) = e.key() {
+                        self.infer_expr(&key);
+                    }
+                    match e.value() {
+                        Some(PropertyValue::Expr(expr)) => {
+                            self.infer_expr(&expr);
                         }
-                        PropertyValue::ObjectBody(body) => self.walk_object_body(body, None),
+                        Some(PropertyValue::ObjectBody(body)) => self.walk_object_body(&body, None),
+                        None => {}
                     }
                 }
-                ObjectMember::When {
-                    cond,
-                    then_body,
-                    else_body,
-                    ..
-                } => {
-                    self.infer_expr(cond);
-                    let narrowing = self.extract_narrowing(cond);
-                    let prev = self.push_narrowing(narrowing.as_ref());
-                    self.walk_object_body(then_body, expected);
-                    self.pop_narrowing(narrowing.as_ref(), prev);
-                    if let Some(b) = else_body {
-                        self.walk_object_body(b, expected);
+                ObjectMember::When(w) => {
+                    if let Some(c) = w.condition() {
+                        self.infer_expr(&c);
+                        let narrowing = self.extract_narrowing(&c);
+                        let prev = self.push_narrowing(narrowing.as_ref());
+                        if let Some(then_body) = w.then_body() {
+                            self.walk_object_body(&then_body, expected);
+                        }
+                        self.pop_narrowing(narrowing.as_ref(), prev);
+                        if let Some(b) = w.else_body() {
+                            self.walk_object_body(&b, expected);
+                        }
+                    } else if let Some(then_body) = w.then_body() {
+                        self.walk_object_body(&then_body, expected);
                     }
                 }
-                ObjectMember::For {
-                    bindings,
-                    iterable,
-                    body,
-                    ..
-                } => {
-                    let iter_ty = self.infer_expr(iterable);
-                    let pushed = self.push_for_bindings(bindings, &iter_ty);
-                    self.walk_object_body(body, expected);
+                ObjectMember::For(f) => {
+                    let bindings: Vec<Parameter> = f.bindings().collect();
+                    let iter_ty = if let Some(iter) = f.iterable() {
+                        self.infer_expr(&iter)
+                    } else {
+                        Ty::Unknown
+                    };
+                    let pushed = self.push_for_bindings(&bindings, &iter_ty);
+                    if let Some(body) = f.body() {
+                        self.walk_object_body(&body, expected);
+                    }
                     self.pop_for_bindings(pushed);
                 }
-                ObjectMember::Spread { expr, .. } => {
-                    self.infer_expr(expr);
+                ObjectMember::Spread(s) => {
+                    if let Some(expr) = s.expr() {
+                        self.infer_expr(&expr);
+                    }
                 }
             }
         }
@@ -698,23 +863,14 @@ impl Inferrer<'_> {
     /// the surrounding object has a known type (from `new T { ... }` or a
     /// `prop: T = new { ... }` binding), record a [`MemberRef`] so the
     /// editor can hover / goto-def on `name = value` inside the body.
-    fn walk_object_property(&mut self, p: &PropertyDecl, expected: Option<&Ty>) {
-        if let Some(expected_ty) = expected {
-            self.record_object_member(p, expected_ty);
-        }
-        // Then recurse with the property's own declared type, if any. This
-        // gives `new T { sub = new { ... } }` the right context for `sub`.
-        self.walk_property(p);
-    }
-
-    fn record_object_member(&mut self, p: &PropertyDecl, expected: &Ty) {
+    fn record_object_member(&mut self, p: &cst::ObjectProperty, expected: &Ty) {
         let expected_unwrapped = expected.unwrap_nullable();
+        let name_text = name_token_text(p.name());
+        let name_span = name_span_or_empty(p.name());
         let stdlib_type = expected_unwrapped
             .stdlib_name()
             .and_then(pkl_stdlib::find_type);
-        let (stdlib_member, owner) = stdlib_type
-            .and_then(|t| find_member(t, &p.name.name))
-            .unzip();
+        let (stdlib_member, owner) = stdlib_type.and_then(|t| find_member(t, &name_text)).unzip();
         let resolved_owner = owner.flatten();
 
         let mut user_class: Option<SymbolId> = None;
@@ -723,7 +879,7 @@ impl Inferrer<'_> {
             if let Some(class_name) = expected_unwrapped.stdlib_name() {
                 if let Some(class_id) = find_user_class(self.resolution, class_name) {
                     user_class = Some(class_id);
-                    if let Some(m_id) = find_class_member(self.resolution, class_id, &p.name.name) {
+                    if let Some(m_id) = find_class_member(self.resolution, class_id, &name_text) {
                         user_member = Some(m_id);
                     }
                 }
@@ -737,12 +893,12 @@ impl Inferrer<'_> {
         }
 
         self.member_refs.insert(
-            p.name.span.start,
+            name_span.start,
             MemberRef {
                 receiver_ty: expected.clone(),
-                receiver_span: p.name.span,
-                member_name: p.name.name.clone(),
-                member_name_span: p.name.span,
+                receiver_span: name_span,
+                member_name: name_text,
+                member_name_span: name_span,
                 stdlib_member,
                 stdlib_type: resolved_owner,
                 user_class,
@@ -755,24 +911,31 @@ impl Inferrer<'_> {
     // Expressions
 
     fn infer_expr(&mut self, expr: &Expr) -> Ty {
+        let span = expr_span(expr);
         let ty = match expr {
             Expr::Literal(lit) => self.infer_literal(lit),
-            Expr::SpecialIdent { kind, .. } => match kind {
-                SpecialIdentKind::This => self.current_class_ty().unwrap_or(Ty::Unknown),
-                SpecialIdentKind::Super => self.super_class_ty().unwrap_or(Ty::Unknown),
-                SpecialIdentKind::Outer => Ty::Unknown,
-                SpecialIdentKind::Module => Ty::Module,
-            },
             Expr::Ident(id) => {
-                if let Some(sym) = self.resolution.by_span_start.get(&id.span.start) {
-                    if let Some(narrowed) = self.narrowings.get(sym) {
-                        return self.record(expr.span(), narrowed.clone());
+                if let Some(kind) = id.special() {
+                    match kind {
+                        SpecialIdentKind::This => self.current_class_ty().unwrap_or(Ty::Unknown),
+                        SpecialIdentKind::Super => self.super_class_ty().unwrap_or(Ty::Unknown),
+                        SpecialIdentKind::Outer => Ty::Unknown,
+                        SpecialIdentKind::Module => Ty::Module,
                     }
-                    let symbol = self.resolution.symbol(*sym);
-                    if !matches!(symbol.declared_ty, Ty::Unknown) {
-                        symbol.declared_ty.clone()
-                    } else if let Some(inferred) = self.inferred_property_types.get(sym) {
-                        inferred.clone()
+                } else if let Some(tok) = id.token() {
+                    let id_span = token_span(&tok);
+                    if let Some(sym) = self.resolution.by_span_start.get(&id_span.start) {
+                        if let Some(narrowed) = self.narrowings.get(sym) {
+                            return self.record(span, narrowed.clone());
+                        }
+                        let symbol = self.resolution.symbol(*sym);
+                        if !matches!(symbol.declared_ty, Ty::Unknown) {
+                            symbol.declared_ty.clone()
+                        } else if let Some(inferred) = self.inferred_property_types.get(sym) {
+                            inferred.clone()
+                        } else {
+                            Ty::Unknown
+                        }
                     } else {
                         Ty::Unknown
                     }
@@ -780,165 +943,278 @@ impl Inferrer<'_> {
                     Ty::Unknown
                 }
             }
-            Expr::Paren { inner, .. } | Expr::NonNull { operand: inner, .. } => {
-                let inner_ty = self.infer_expr(inner);
-                if matches!(expr, Expr::NonNull { .. }) {
-                    // `expr!!` strips the nullable wrapper.
-                    match inner_ty {
-                        Ty::Nullable(t) => *t,
-                        other => other,
-                    }
+            Expr::Paren(p) => {
+                if let Some(inner) = p.inner() {
+                    self.infer_expr(&inner)
                 } else {
-                    inner_ty
+                    Ty::Unknown
                 }
             }
-            Expr::Unary { op, operand, .. } => {
-                let operand_ty = self.infer_expr(operand);
-                match op {
-                    UnaryOp::Not => Ty::Boolean,
-                    UnaryOp::Neg => match operand_ty {
+            Expr::NonNull(n) => {
+                let inner_ty = if let Some(operand) = n.operand() {
+                    self.infer_expr(&operand)
+                } else {
+                    Ty::Unknown
+                };
+                // `expr!!` strips the nullable wrapper.
+                match inner_ty {
+                    Ty::Nullable(t) => *t,
+                    other => other,
+                }
+            }
+            Expr::Unary(u) => {
+                let operand_ty = if let Some(operand) = u.operand() {
+                    self.infer_expr(&operand)
+                } else {
+                    Ty::Unknown
+                };
+                match u.op() {
+                    Some(UnaryOp::Not) => Ty::Boolean,
+                    Some(UnaryOp::Neg) => match operand_ty {
                         Ty::Int | Ty::Float | Ty::Number => operand_ty,
                         _ => Ty::Unknown,
                     },
+                    None => Ty::Unknown,
                 }
             }
-            Expr::Binary { op, lhs, rhs, .. } => {
-                let l = self.infer_expr(lhs);
-                let r = self.infer_expr(rhs);
-                infer_binary(*op, &l, &r)
+            Expr::Binary(b) => {
+                let l = if let Some(lhs) = b.lhs() {
+                    self.infer_expr(&lhs)
+                } else {
+                    Ty::Unknown
+                };
+                let r = if let Some(rhs) = b.rhs() {
+                    self.infer_expr(&rhs)
+                } else {
+                    Ty::Unknown
+                };
+                match b.op() {
+                    Some(op) => infer_binary(op, &l, &r),
+                    None => Ty::Unknown,
+                }
             }
-            Expr::TypeCheck { operand, ty, .. } => {
-                self.infer_expr(operand);
-                self.walk_type(ty);
+            Expr::NullCoalesce(n) => {
+                let l = if let Some(lhs) = n.lhs() {
+                    self.infer_expr(&lhs)
+                } else {
+                    Ty::Unknown
+                };
+                let r = if let Some(rhs) = n.rhs() {
+                    self.infer_expr(&rhs)
+                } else {
+                    Ty::Unknown
+                };
+                match l {
+                    Ty::Nullable(inner) => join_types((*inner).clone(), r),
+                    _ => join_types(l, r),
+                }
+            }
+            Expr::TypeCheck(tc) => {
+                if let Some(operand) = tc.operand() {
+                    self.infer_expr(&operand);
+                }
+                if let Some(ty) = tc.ty() {
+                    self.walk_type(&ty);
+                }
                 Ty::Boolean
             }
-            Expr::TypeCast { operand, ty, .. } => {
-                self.infer_expr(operand);
-                self.walk_type(ty);
-                Ty::from_type_ref(ty)
+            Expr::TypeCast(tc) => {
+                if let Some(operand) = tc.operand() {
+                    self.infer_expr(&operand);
+                }
+                if let Some(ty) = tc.ty() {
+                    self.walk_type(&ty);
+                    Ty::from_cst_type(&ty)
+                } else {
+                    Ty::Unknown
+                }
             }
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.infer_expr(cond);
-                let narrowing = self.extract_narrowing(cond);
+            Expr::If(i) => {
+                let cond = i.condition();
+                if let Some(c) = &cond {
+                    self.infer_expr(c);
+                }
+                let narrowing = cond.as_ref().and_then(|c| self.extract_narrowing(c));
                 let prev = self.push_narrowing(narrowing.as_ref());
-                let t = self.infer_expr(then_branch);
+                let t = if let Some(then_branch) = i.then_branch() {
+                    self.infer_expr(&then_branch)
+                } else {
+                    Ty::Unknown
+                };
                 self.pop_narrowing(narrowing.as_ref(), prev);
-                let e = self.infer_expr(else_branch);
+                let e = if let Some(else_branch) = i.else_branch() {
+                    self.infer_expr(&else_branch)
+                } else {
+                    Ty::Unknown
+                };
                 self.join_class_types(t, e)
             }
-            Expr::Let { value, body, .. } => {
-                // The binding is registered in the symbol table during
-                // resolution; here we just walk both children.
-                self.infer_expr(value);
-                self.infer_expr(body)
+            Expr::Let(l) => {
+                if let Some(value) = l.value() {
+                    self.infer_expr(&value);
+                }
+                if let Some(body) = l.body() {
+                    self.infer_expr(&body)
+                } else {
+                    Ty::Unknown
+                }
             }
-            Expr::Lambda {
-                parameters, body, ..
-            } => {
-                let ret_ty = self.infer_expr(body);
+            Expr::Lambda(lam) => {
+                let ret_ty = if let Some(body) = lam.body() {
+                    self.infer_expr(&body)
+                } else {
+                    Ty::Unknown
+                };
+                let parameters: Vec<Parameter> = lam
+                    .parameters()
+                    .map(|pl| pl.parameters().collect())
+                    .unwrap_or_default();
                 let params = parameters
                     .iter()
-                    .map(|p| p.ty.as_ref().map(Ty::from_type_ref).unwrap_or(Ty::Unknown))
+                    .map(|p| {
+                        p.ty()
+                            .as_ref()
+                            .map(Ty::from_cst_type)
+                            .unwrap_or(Ty::Unknown)
+                    })
                     .collect();
                 Ty::Function {
                     params,
                     ret: Box::new(ret_ty),
                 }
             }
-            Expr::Call { callee, args, .. } => {
+            Expr::Call(c) => {
+                let callee = c.callee();
+                let args: Vec<Expr> = c.args();
                 // For member calls we want to pre-narrow untyped lambda
                 // parameters from the member's signature *before* walking
                 // each argument, so that `xs.map((x) -> x.length)` types
                 // `x` as the element type.
-                if let Expr::Member {
-                    receiver,
-                    name,
-                    nullable: _,
-                    ..
-                } = callee.as_ref()
-                {
-                    let receiver_span = receiver.span();
-                    let receiver_ty = self.infer_expr(receiver);
-                    let arg_types = self.infer_args_with_narrowing(&receiver_ty, Some(name), args);
-                    let (member_ty, _is_member) = self.resolve_member_access(
-                        &receiver_ty,
-                        receiver_span,
-                        name,
-                        name.span,
-                        Some(&arg_types),
-                    );
-                    self.record(callee.span(), member_ty.clone());
+                if let Some(Expr::Member(mem)) = &callee {
+                    let receiver = mem.receiver();
+                    let receiver_span = receiver.as_ref().map(expr_span).unwrap_or(Span::EMPTY);
+                    let receiver_ty = receiver
+                        .as_ref()
+                        .map(|r| self.infer_expr(r))
+                        .unwrap_or(Ty::Unknown);
+                    let name = mem.name();
+                    let arg_types =
+                        self.infer_args_with_narrowing(&receiver_ty, name.as_ref(), &args);
+                    let (member_ty, _is_member) = if let Some(name_tok) = name {
+                        self.resolve_member_access(
+                            &receiver_ty,
+                            receiver_span,
+                            &name_tok,
+                            Some(&arg_types),
+                        )
+                    } else {
+                        (Ty::Unknown, false)
+                    };
+                    if let Some(callee_expr) = &callee {
+                        self.record(expr_span(callee_expr), member_ty.clone());
+                    }
                     member_ty
                 } else {
                     let arg_types: Vec<Ty> = args.iter().map(|a| self.infer_expr(a)).collect();
-                    self.infer_top_level_call(callee, &arg_types)
+                    if let Some(callee_expr) = callee {
+                        self.infer_top_level_call(&callee_expr, &arg_types)
+                    } else {
+                        Ty::Unknown
+                    }
                 }
             }
-            Expr::Index {
-                receiver, index, ..
-            } => {
-                let recv_ty = self.infer_expr(receiver);
-                self.infer_expr(index);
+            Expr::Index(i) => {
+                let recv_ty = if let Some(receiver) = i.receiver() {
+                    self.infer_expr(&receiver)
+                } else {
+                    Ty::Unknown
+                };
+                if let Some(index) = i.index() {
+                    self.infer_expr(&index);
+                }
                 index_result_type(&recv_ty)
             }
-            Expr::Member { receiver, name, .. } => {
-                let receiver_span = receiver.span();
-                let receiver_ty = self.infer_expr(receiver);
-                let (member_ty, _) =
-                    self.resolve_member_access(&receiver_ty, receiver_span, name, name.span, None);
+            Expr::Member(m) => {
+                let receiver = m.receiver();
+                let receiver_span = receiver.as_ref().map(expr_span).unwrap_or(Span::EMPTY);
+                let receiver_ty = receiver
+                    .as_ref()
+                    .map(|r| self.infer_expr(r))
+                    .unwrap_or(Ty::Unknown);
+                let (member_ty, _) = if let Some(name_tok) = m.name() {
+                    self.resolve_member_access(&receiver_ty, receiver_span, &name_tok, None)
+                } else {
+                    (Ty::Unknown, false)
+                };
                 member_ty
             }
-            Expr::New { ty, body, .. } => {
-                if let Some(t) = ty {
+            Expr::New(n) => {
+                let ty = n.ty();
+                if let Some(t) = &ty {
                     self.walk_type(t);
                 }
                 // Prefer the explicit `new Type { ... }` annotation, but
                 // fall back to whatever the surrounding binding expected.
                 let new_ty = ty
                     .as_ref()
-                    .map(Ty::from_type_ref)
+                    .map(Ty::from_cst_type)
                     .filter(|t| !matches!(t, Ty::Unknown))
                     .or_else(|| self.expected_context.clone())
                     .unwrap_or(Ty::Unknown);
-                self.walk_object_body(body, Some(&new_ty));
+                if let Some(body) = n.body() {
+                    self.walk_object_body(&body, Some(&new_ty));
+                }
                 new_ty
             }
-            Expr::AmendsObject { base, body, .. } => {
-                let base_ty = self.infer_expr(base);
-                self.walk_object_body(body, Some(&base_ty));
+            Expr::Amends(a) => {
+                let base_ty = if let Some(base) = a.base() {
+                    self.infer_expr(&base)
+                } else {
+                    Ty::Unknown
+                };
+                if let Some(body) = a.body() {
+                    self.walk_object_body(&body, Some(&base_ty));
+                }
                 base_ty
             }
-            Expr::Throw { argument, .. } => {
-                self.infer_expr(argument);
+            Expr::Throw(t) => {
+                if let Some(arg) = t.argument() {
+                    self.infer_expr(&arg);
+                }
                 Ty::Nothing
             }
-            Expr::Trace { argument, .. } => self.infer_expr(argument),
-            Expr::Read { argument, kind, .. } => {
-                self.infer_expr(argument);
-                match kind {
-                    ReadKind::Read => Ty::Resource,
-                    ReadKind::ReadOrNull => Ty::Nullable(Box::new(Ty::Resource)),
-                    ReadKind::ReadGlob => Ty::Map(Box::new(Ty::Str), Box::new(Ty::Resource)),
+            Expr::Trace(t) => {
+                if let Some(arg) = t.argument() {
+                    self.infer_expr(&arg)
+                } else {
+                    Ty::Unknown
                 }
             }
-            Expr::Error { .. } => Ty::Unknown,
+            Expr::Read(r) => {
+                if let Some(arg) = r.argument() {
+                    self.infer_expr(&arg);
+                }
+                match r.read_kind() {
+                    Some(ReadKind::Read) => Ty::Resource,
+                    Some(ReadKind::ReadOrNull) => Ty::Nullable(Box::new(Ty::Resource)),
+                    Some(ReadKind::ReadGlob) => Ty::Map(Box::new(Ty::Str), Box::new(Ty::Resource)),
+                    None => Ty::Unknown,
+                }
+            }
+            Expr::Error(_) => Ty::Unknown,
         };
-        self.record(expr.span(), ty.clone());
+        self.record(span, ty.clone());
         ty
     }
 
-    fn infer_literal(&self, lit: &Literal) -> Ty {
-        match lit {
-            Literal::Int { .. } => Ty::Int,
-            Literal::Float { .. } => Ty::Float,
-            Literal::String(_) => Ty::Str,
-            Literal::Bool { .. } => Ty::Boolean,
-            Literal::Null { .. } => Ty::Null,
+    fn infer_literal(&self, lit: &LiteralExpr) -> Ty {
+        match lit.kind() {
+            Some(LiteralKind::Int) => Ty::Int,
+            Some(LiteralKind::Float) => Ty::Float,
+            Some(LiteralKind::String) | Some(LiteralKind::MultilineString) => Ty::Str,
+            Some(LiteralKind::Bool) => Ty::Boolean,
+            Some(LiteralKind::Null) => Ty::Null,
+            None => Ty::Unknown,
         }
     }
 
@@ -949,23 +1225,29 @@ impl Inferrer<'_> {
     fn infer_top_level_call(&mut self, callee: &Expr, args: &[Ty]) -> Ty {
         // Try to find the stdlib function backing this callee.
         if let Expr::Ident(id) = callee {
-            if let Some(sym_id) = self.resolution.by_span_start.get(&id.span.start) {
-                let sym = self.resolution.symbol(*sym_id);
-                if sym.origin.is_stdlib() {
-                    if let Some(f) = pkl_stdlib::find_function(&sym.name) {
-                        let parsed = parse_signature(f.signature);
-                        let mut env: HashMap<String, Ty> = HashMap::new();
-                        let type_vars: HashSet<String> =
-                            parsed.type_params.iter().cloned().collect();
-                        // For variadic stdlib constructors like `List(T...)`
-                        // the parsed signature has a single param of type T;
-                        // unify it against every actual argument.
-                        for actual in args {
-                            for declared in &parsed.param_types {
-                                unify(declared, actual, &type_vars, &mut env);
+            if let Some(tok) = id.token() {
+                if id.special().is_none() {
+                    let id_span = token_span(&tok);
+                    if let Some(sym_id) = self.resolution.by_span_start.get(&id_span.start) {
+                        let sym = self.resolution.symbol(*sym_id);
+                        if sym.origin.is_stdlib() {
+                            if let Some(f) = pkl_stdlib::find_function(&sym.name) {
+                                let parsed = parse_signature(f.signature);
+                                let mut env: HashMap<String, Ty> = HashMap::new();
+                                let type_vars: HashSet<String> =
+                                    parsed.type_params.iter().cloned().collect();
+                                // For variadic stdlib constructors like
+                                // `List(T...)` the parsed signature has a
+                                // single param of type T; unify it against
+                                // every actual argument.
+                                for actual in args {
+                                    for declared in &parsed.param_types {
+                                        unify(declared, actual, &type_vars, &mut env);
+                                    }
+                                }
+                                return parsed.return_ty.substitute(&env);
                             }
                         }
-                        return parsed.return_ty.substitute(&env);
                     }
                 }
             }
@@ -988,16 +1270,17 @@ impl Inferrer<'_> {
         &mut self,
         receiver_ty: &Ty,
         receiver_span: Span,
-        name: &Identifier,
-        name_span: Span,
+        name: &SyntaxToken,
         call_args: Option<&[Ty]>,
     ) -> (Ty, bool) {
+        let name_text = ident_text(name);
+        let name_span = token_span(name);
         // Unwrap Nullable so `x?.length` still finds `length` on `String`.
         let receiver_unwrapped = receiver_ty.unwrap_nullable();
         let stdlib_type = receiver_unwrapped
             .stdlib_name()
             .and_then(pkl_stdlib::find_type);
-        let (member, owner) = stdlib_type.and_then(|t| find_member(t, &name.name)).unzip();
+        let (member, owner) = stdlib_type.and_then(|t| find_member(t, &name_text)).unzip();
         let resolved_owner = owner.flatten();
 
         // Build the substitution environment from the receiver's own generic
@@ -1022,7 +1305,7 @@ impl Inferrer<'_> {
             if let Some(class_name) = receiver_unwrapped.stdlib_name() {
                 if let Some(class_id) = find_user_class(self.resolution, class_name) {
                     user_class = Some(class_id);
-                    if let Some(m_id) = find_class_member(self.resolution, class_id, &name.name) {
+                    if let Some(m_id) = find_class_member(self.resolution, class_id, &name_text) {
                         user_member = Some(m_id);
                         member_ty = self.resolution.symbol(m_id).declared_ty.clone();
                     }
@@ -1039,7 +1322,7 @@ impl Inferrer<'_> {
             MemberRef {
                 receiver_ty: receiver_ty.clone(),
                 receiver_span,
-                member_name: name.name.clone(),
+                member_name: name_text,
                 member_name_span: name_span,
                 stdlib_member: member,
                 stdlib_type: resolved_owner,
@@ -1227,10 +1510,6 @@ fn infer_binary(op: BinaryOp, l: &Ty, r: &Ty) -> Ty {
             }
         }
         Sub | Mul | Rem | Pow | Div => join_numeric(l, r),
-        NullCoalesce => match l {
-            Ty::Nullable(inner) => join_types((**inner).clone(), r.clone()),
-            _ => join_types(l.clone(), r.clone()),
-        },
         Pipeline => r.clone(),
     }
 }
@@ -1266,4 +1545,19 @@ fn index_result_type(recv: &Ty) -> Ty {
         Ty::Str => Ty::Char,
         _ => Ty::Unknown,
     }
+}
+
+/// Significant span of an expression (excludes leading/trailing trivia).
+/// Used as the universal key for `expr_types` lookups so the inferrer's
+/// output matches the LSP's offset queries.
+pub(crate) fn expr_span(e: &Expr) -> Span {
+    significant_span(e.syntax())
+}
+
+fn name_token_text(t: Option<SyntaxToken>) -> String {
+    t.map(|t| ident_text(&t)).unwrap_or_default()
+}
+
+fn name_span_or_empty(t: Option<SyntaxToken>) -> Span {
+    t.map(|t| token_span(&t)).unwrap_or(Span::EMPTY)
 }

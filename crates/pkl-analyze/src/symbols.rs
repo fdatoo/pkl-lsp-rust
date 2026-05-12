@@ -1,6 +1,6 @@
 //! Symbol table: every declaration the analyzer cares about.
 
-use pkl_syntax::ast::ModifierKind;
+use pkl_syntax::cst::ModifierKind;
 use pkl_syntax::span::Span;
 
 use crate::types::Ty;

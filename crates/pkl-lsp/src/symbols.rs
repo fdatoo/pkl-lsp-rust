@@ -2,43 +2,36 @@
 
 use tower_lsp::lsp_types::{DocumentSymbol, SymbolKind};
 
-use pkl_syntax::ast::{ClassMember, Item, Module};
+use pkl_syntax::cst::{
+    self, ident_text, significant_span, token_span, AstNode, ClauseKind, Item, Module,
+};
 
 use crate::document::Document;
 
 /// Build a hierarchical `DocumentSymbol` tree for a parsed module.
 pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     let mut out = Vec::new();
-    let module = &doc.parsed.module;
-    if let Some(symbol) = module_symbol(doc, module) {
+    let module = doc.module();
+    if let Some(symbol) = module_symbol(doc, &module) {
         out.push(symbol);
     }
-    for item in &module.items {
-        out.extend(item_symbol(doc, item));
+    for item in module.items() {
+        out.extend(item_symbol(doc, &item));
     }
     out
 }
 
 #[allow(deprecated)] // `DocumentSymbol::deprecated` is deprecated but the type still requires it.
 fn module_symbol(doc: &Document, module: &Module) -> Option<DocumentSymbol> {
-    let header = module.header.as_ref()?;
-    let name = header
-        .name
-        .as_ref()
-        .map(|q| {
-            q.segments
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join(".")
+    let header = module.header()?;
+    let name = header.name().map(|q| q.text_joined()).or_else(|| {
+        header.clause().map(|c| match c.kind() {
+            ClauseKind::Amends => "amends".to_string(),
+            ClauseKind::Extends => "extends".to_string(),
         })
-        .or_else(|| {
-            header.clause.as_ref().map(|c| match c {
-                pkl_syntax::ast::ExtendsAmendsClause::Amends { .. } => "amends".to_string(),
-                pkl_syntax::ast::ExtendsAmendsClause::Extends { .. } => "extends".to_string(),
-            })
-        })?;
-    let range = doc.span_to_range(header.span);
+    })?;
+    let span = significant_span(header.syntax());
+    let range = doc.span_to_range(span);
     Some(DocumentSymbol {
         name,
         detail: None,
@@ -55,16 +48,17 @@ fn module_symbol(doc: &Document, module: &Module) -> Option<DocumentSymbol> {
 fn item_symbol(doc: &Document, item: &Item) -> Option<DocumentSymbol> {
     match item {
         Item::Class(c) => {
-            let range = doc.span_to_range(c.span);
-            let selection_range = doc.span_to_range(c.name.span);
+            let range = doc.span_to_range(significant_span(c.syntax()));
+            let name_tok = c.name()?;
+            let selection_range = doc.span_to_range(token_span(&name_tok));
             let mut children = Vec::new();
-            if let Some(body) = &c.body {
-                for m in &body.members {
-                    children.extend(member_symbol(doc, m));
+            if let Some(body) = c.body() {
+                for m in body.members() {
+                    children.extend(member_symbol(doc, &m));
                 }
             }
             Some(DocumentSymbol {
-                name: c.name.name.clone(),
+                name: ident_text(&name_tok),
                 detail: None,
                 kind: SymbolKind::CLASS,
                 tags: None,
@@ -78,62 +72,77 @@ fn item_symbol(doc: &Document, item: &Item) -> Option<DocumentSymbol> {
                 },
             })
         }
-        Item::TypeAlias(t) => Some(DocumentSymbol {
-            name: t.name.name.clone(),
-            detail: None,
-            kind: SymbolKind::INTERFACE,
-            tags: None,
-            deprecated: None,
-            range: doc.span_to_range(t.span),
-            selection_range: doc.span_to_range(t.name.span),
-            children: None,
-        }),
-        Item::Property(p) => Some(DocumentSymbol {
-            name: p.name.name.clone(),
-            detail: None,
-            kind: SymbolKind::PROPERTY,
-            tags: None,
-            deprecated: None,
-            range: doc.span_to_range(p.span),
-            selection_range: doc.span_to_range(p.name.span),
-            children: None,
-        }),
-        Item::Method(m) => Some(DocumentSymbol {
-            name: m.name.name.clone(),
-            detail: None,
-            kind: SymbolKind::FUNCTION,
-            tags: None,
-            deprecated: None,
-            range: doc.span_to_range(m.span),
-            selection_range: doc.span_to_range(m.name.span),
-            children: None,
-        }),
+        Item::TypeAlias(t) => {
+            let name_tok = t.name()?;
+            Some(DocumentSymbol {
+                name: ident_text(&name_tok),
+                detail: None,
+                kind: SymbolKind::INTERFACE,
+                tags: None,
+                deprecated: None,
+                range: doc.span_to_range(significant_span(t.syntax())),
+                selection_range: doc.span_to_range(token_span(&name_tok)),
+                children: None,
+            })
+        }
+        Item::Property(p) => {
+            let name_tok = p.name()?;
+            Some(DocumentSymbol {
+                name: ident_text(&name_tok),
+                detail: None,
+                kind: SymbolKind::PROPERTY,
+                tags: None,
+                deprecated: None,
+                range: doc.span_to_range(significant_span(p.syntax())),
+                selection_range: doc.span_to_range(token_span(&name_tok)),
+                children: None,
+            })
+        }
+        Item::Method(m) => {
+            let name_tok = m.name()?;
+            Some(DocumentSymbol {
+                name: ident_text(&name_tok),
+                detail: None,
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                deprecated: None,
+                range: doc.span_to_range(significant_span(m.syntax())),
+                selection_range: doc.span_to_range(token_span(&name_tok)),
+                children: None,
+            })
+        }
         Item::Error(_) => None,
     }
 }
 
 #[allow(deprecated)]
-fn member_symbol(doc: &Document, member: &ClassMember) -> Option<DocumentSymbol> {
+fn member_symbol(doc: &Document, member: &cst::ClassMember) -> Option<DocumentSymbol> {
     match member {
-        ClassMember::Property(p) => Some(DocumentSymbol {
-            name: p.name.name.clone(),
-            detail: None,
-            kind: SymbolKind::PROPERTY,
-            tags: None,
-            deprecated: None,
-            range: doc.span_to_range(p.span),
-            selection_range: doc.span_to_range(p.name.span),
-            children: None,
-        }),
-        ClassMember::Method(m) => Some(DocumentSymbol {
-            name: m.name.name.clone(),
-            detail: None,
-            kind: SymbolKind::METHOD,
-            tags: None,
-            deprecated: None,
-            range: doc.span_to_range(m.span),
-            selection_range: doc.span_to_range(m.name.span),
-            children: None,
-        }),
+        cst::ClassMember::Property(p) => {
+            let name_tok = p.name()?;
+            Some(DocumentSymbol {
+                name: ident_text(&name_tok),
+                detail: None,
+                kind: SymbolKind::PROPERTY,
+                tags: None,
+                deprecated: None,
+                range: doc.span_to_range(significant_span(p.syntax())),
+                selection_range: doc.span_to_range(token_span(&name_tok)),
+                children: None,
+            })
+        }
+        cst::ClassMember::Method(m) => {
+            let name_tok = m.name()?;
+            Some(DocumentSymbol {
+                name: ident_text(&name_tok),
+                detail: None,
+                kind: SymbolKind::METHOD,
+                tags: None,
+                deprecated: None,
+                range: doc.span_to_range(significant_span(m.syntax())),
+                selection_range: doc.span_to_range(token_span(&name_tok)),
+                children: None,
+            })
+        }
     }
 }

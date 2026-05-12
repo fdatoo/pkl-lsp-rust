@@ -8,6 +8,7 @@ use ropey::Rope;
 use tower_lsp::lsp_types::{Position, Range};
 
 use pkl_analyze::{analyze, Analysis};
+use pkl_syntax::cst::{AstNode, Module};
 use pkl_syntax::parse;
 use pkl_syntax::span::Span;
 use pkl_syntax::ParseResult;
@@ -28,7 +29,7 @@ impl Document {
     pub fn new(text: String, version: i32) -> Self {
         let rope = Rope::from_str(&text);
         let parsed = parse(&text);
-        let analysis = analyze(&parsed.module, parsed.diagnostics.clone());
+        let analysis = analyze(&parsed.syntax(), parsed.diagnostics.clone());
         Self {
             rope,
             parsed,
@@ -59,7 +60,7 @@ impl Document {
     fn reparse(&mut self) {
         let text = self.rope.to_string();
         self.parsed = parse(&text);
-        self.analysis = analyze(&self.parsed.module, self.parsed.diagnostics.clone());
+        self.analysis = analyze(&self.parsed.syntax(), self.parsed.diagnostics.clone());
     }
 
     /// Convert a byte-offset [`Span`] into an LSP [`Range`].
@@ -75,6 +76,11 @@ impl Document {
     pub fn position_to_offset(&self, pos: Position) -> u32 {
         let char_idx = position_to_char_index(&self.rope, pos);
         self.rope.char_to_byte(char_idx) as u32
+    }
+
+    /// Build a fresh typed CST [`Module`] view of the current parse result.
+    pub fn module(&self) -> Module {
+        Module::cast(self.parsed.syntax()).expect("syntax root must be a Module node")
     }
 }
 

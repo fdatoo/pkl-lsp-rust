@@ -18,8 +18,9 @@ Legend:
   stateful re-entrant lexer and a new AST shape.
 - [-] **Custom-delimited string interpolation.** Same as above for
   `#"...#\(expr)..."#`.
-- [-] **Doc-comment recovery for trailing trivia.** Deferred: blocked
-  on the lossless syntax tree.
+- [x] **Doc-comment recovery for leading trivia.** `cst::doc_comment_for`
+  walks the leading-trivia children of a `SyntaxNode` so consumers can
+  recover the doc comment for any declaration on demand.
 - [-] **`new { ... }` element syntax.** Object bodies accept bare
   expressions as `ObjectMember::Element` today; no specific edge case
   remains open. Tracked as deferred polish if real-world examples
@@ -27,10 +28,15 @@ Legend:
 - [x] **Type-level tuples.** Parser emits a friendly diagnostic
   ("use `Pair<A, B>` or a function type `(A, B) -> R`") instead of
   failing silently.
-- [-] **Lossless syntax tree.** Token-level semantic highlighting and
-  formatting ship today; a `rowan`-style lossless tree is a multi-week
-  rewrite kept deferred. Unlocks comment-preserving formatter +
-  doc-comment recovery + richer refactorings.
+- [x] **Lossless syntax tree.** `pkl_syntax::parse` drives a
+  `rowan`-based lossless parser and returns a `ParseResult` carrying
+  the immutable green tree plus syntax diagnostics. `pkl_syntax::cst`
+  provides typed newtype wrappers (`Module`, `ClassDecl`, `Expr`, …)
+  with accessor methods that walk the tree on demand. Round-trip and
+  smoke-fuzz tests assert `parse_green(src).syntax.text() == src` for
+  both curated and mutated/random inputs. The formatter, analyzer,
+  LSP feature handlers, and stdlib scraper all consume the lossless
+  tree — there is no longer a separate owned AST.
 
 ## Resolver / Symbol table (`pkl-analyze::resolver`)
 
@@ -133,7 +139,8 @@ Legend:
   unannotated properties whose type the inferrer worked out. More
   actions can land in the same module.
 - [x] **Document formatting.** AST-driven; comment-preserving variant
-  waits on the lossless tree.
+  over the lossless tree is open work (see
+  "Lossless tree consumer migration" below).
 - [x] **Semantic tokens.** 14-type / 3-modifier legend driven by the
   token stream + resolver.
 - [x] **Inlay hints.** Type hints after unannotated property
@@ -170,10 +177,35 @@ Legend:
 - [x] **README namespace example** wired to a `switchyard` mapping.
 - [x] **Contribution guide.** `CONTRIBUTING.md`.
 
+## Lossless tree consumer migration
+
+The lossless syntax tree is now the single source of truth across the
+whole stack. The owned AST has been retired entirely; every consumer
+walks `cst::*` directly.
+
+- [x] **Comment-preserving formatter.** `pkl-syntax::format` walks
+  `cst::Module` over the lossless tree and emits ordinary `//` and
+  `/* ... */` comments verbatim at every declaration boundary.
+- [x] **Retire the hand-rolled parser.** The 1958-line
+  recursive-descent parser is gone; `pkl-syntax::parser::parse` is a
+  thin wrapper around `green::parse_green`.
+- [x] **Analyzer port.** `pkl-analyze::resolver` and
+  `pkl-analyze::infer` walk `cst::Module`. `analyze(syntax,
+  diagnostics)` takes a rowan `SyntaxNode`. Span identities are
+  preserved by `cst::significant_span`, which excludes trivia from a
+  node's range so the analyzer's offset-keyed lookups still match.
+- [x] **LSP feature handlers.** `code_actions`, `folding`,
+  `inlay_hints`, `selection_range`, `signature_help`, and `symbols`
+  all walk `cst::*`. `Document::module()` exposes a typed view onto
+  the cached parse result.
+- [x] **Delete the owned AST.** `pkl-syntax::ast` and
+  `pkl-syntax::ast_build` are gone. `cst::*` is the only typed entry
+  point.
+
 ---
 
-Every actionable item has been worked through. The remaining `[-]`
-entries are deferred by design (string interpolation, lossless tree,
-stdlib type-parameter symbols, transitive graph invalidation) with
-short rationales attached. Strike or add items as they land or
-emerge.
+Every actionable item above the migration list has been worked
+through. The remaining `[-]` entries are deferred by design (string
+interpolation, stdlib type-parameter symbols, transitive graph
+invalidation) with short rationales attached. Strike or add items as
+they land or emerge.

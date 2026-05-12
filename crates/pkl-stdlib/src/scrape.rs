@@ -14,7 +14,12 @@
 
 use std::sync::OnceLock;
 
-use pkl_syntax::ast::*;
+use pkl_syntax::cst::{
+    self, AstNode, ClassDecl, ClassMember, ClassMethodDecl, ClassPropertyDecl, FunctionType, Item,
+    MethodDecl, ModifierKind, Module, NamedType, Parameter, ParenthesizedType, PropertyDecl, Type,
+    TypeParameter, UnionType,
+};
+use pkl_syntax::SyntaxToken;
 
 use crate::{MemberKind, StdlibKind, StdlibMember, StdlibType};
 
@@ -23,120 +28,187 @@ use crate::{MemberKind, StdlibKind, StdlibMember, StdlibType};
 pub fn parsed_base() -> &'static [&'static StdlibType] {
     static CELL: OnceLock<Vec<&'static StdlibType>> = OnceLock::new();
     CELL.get_or_init(|| {
-        let module = pkl_syntax::parse(crate::vendored::find("base").unwrap().source).module;
+        let parsed = pkl_syntax::parse(crate::vendored::find("base").unwrap().source);
+        let module = Module::cast(parsed.syntax()).expect("Module root");
         module
-            .items
-            .iter()
-            .filter_map(class_decl)
-            .map(|c| leak_type(c, "pkl.base"))
+            .items()
+            .filter_map(|item| match item {
+                Item::Class(c) => Some(leak_type(&c, "pkl.base")),
+                _ => None,
+            })
             .collect()
     })
 }
 
-fn class_decl(item: &Item) -> Option<&ClassDecl> {
-    if let Item::Class(c) = item {
-        Some(c)
-    } else {
-        None
-    }
-}
-
 fn leak_type(c: &ClassDecl, module: &'static str) -> &'static StdlibType {
     let mut members: Vec<StdlibMember> = Vec::new();
-    if let Some(body) = &c.body {
-        for m in &body.members {
+    if let Some(body) = c.body() {
+        for m in body.members() {
             match m {
-                ClassMember::Property(p) => members.push(leak_property(p)),
-                ClassMember::Method(m) => members.push(leak_method(m)),
+                ClassMember::Property(p) => members.push(leak_class_property(&p)),
+                ClassMember::Method(m) => members.push(leak_class_method(&m)),
             }
         }
     }
     let members_leaked: &'static [StdlibMember] = Box::leak(members.into_boxed_slice());
-    let kind = if has_modifier(&c.modifiers, ModifierKind::Abstract) {
+    let modifier_kinds: Vec<ModifierKind> = c.modifiers().filter_map(|m| m.kind()).collect();
+    let kind = if modifier_kinds.contains(&ModifierKind::Abstract) {
         StdlibKind::AbstractClass
-    } else if has_modifier(&c.modifiers, ModifierKind::Open) {
+    } else if modifier_kinds.contains(&ModifierKind::Open) {
         StdlibKind::OpenClass
     } else {
         StdlibKind::Class
     };
     let generics: Vec<&'static str> = c
-        .type_parameters
-        .iter()
-        .map(|p| static_str(&p.name.name))
-        .collect();
+        .type_parameters()
+        .map(|tps| {
+            tps.parameters()
+                .filter_map(|p: TypeParameter| p.name().map(|t| static_str(&cst::ident_text(&t))))
+                .collect()
+        })
+        .unwrap_or_default();
     let generics_leaked: &'static [&'static str] = Box::leak(generics.into_boxed_slice());
     let extends = c
-        .extends
+        .extends()
         .as_ref()
         .map(format_type)
-        .as_deref()
-        .map(static_str);
+        .map(|s| static_str(&s));
     let leaked = Box::new(StdlibType {
-        name: static_str(&c.name.name),
+        name: static_str(&token_name(c.name())),
         module,
         kind,
         generics: generics_leaked,
         extends,
-        doc: doc_or_empty(c.doc_comment.as_deref()),
+        doc: doc_or_empty(c.doc_comment().as_deref()),
         members: members_leaked,
     });
     Box::leak(leaked)
 }
 
-fn leak_property(p: &PropertyDecl) -> StdlibMember {
-    let ty =
-        p.ty.as_ref()
-            .map(format_type)
-            .unwrap_or_else(|| "Any".to_string());
-    let signature = static_str(&format!("{}: {}", p.name.name, ty));
+fn leak_class_property(p: &ClassPropertyDecl) -> StdlibMember {
+    let ty = p
+        .ty()
+        .as_ref()
+        .map(format_type)
+        .unwrap_or_else(|| "Any".to_string());
+    let signature = static_str(&format!("{}: {}", token_name(p.name()), ty));
     StdlibMember {
-        name: static_str(&p.name.name),
+        name: static_str(&token_name(p.name())),
         kind: MemberKind::Property,
         signature,
-        doc: doc_or_empty(p.doc_comment.as_deref()),
+        doc: doc_or_empty(p.doc_comment().as_deref()),
     }
 }
 
-fn leak_method(m: &MethodDecl) -> StdlibMember {
+#[allow(dead_code)]
+fn leak_property(p: &PropertyDecl) -> StdlibMember {
+    let ty = p
+        .ty()
+        .as_ref()
+        .map(format_type)
+        .unwrap_or_else(|| "Any".to_string());
+    let signature = static_str(&format!("{}: {}", token_name(p.name()), ty));
+    StdlibMember {
+        name: static_str(&token_name(p.name())),
+        kind: MemberKind::Property,
+        signature,
+        doc: doc_or_empty(p.doc_comment().as_deref()),
+    }
+}
+
+fn leak_class_method(m: &ClassMethodDecl) -> StdlibMember {
     let mut sig = String::new();
-    sig.push_str(&m.name.name);
-    if !m.type_parameters.is_empty() {
+    sig.push_str(&token_name(m.name()));
+    let tps: Vec<TypeParameter> = m
+        .type_parameters()
+        .map(|tps| tps.parameters().collect())
+        .unwrap_or_default();
+    if !tps.is_empty() {
         sig.push('<');
-        for (i, tp) in m.type_parameters.iter().enumerate() {
+        for (i, tp) in tps.iter().enumerate() {
             if i > 0 {
                 sig.push_str(", ");
             }
-            sig.push_str(&tp.name.name);
+            sig.push_str(&token_name(tp.name()));
         }
         sig.push('>');
     }
     sig.push('(');
-    for (i, p) in m.parameters.iter().enumerate() {
+    let params: Vec<Parameter> = m
+        .parameters()
+        .map(|pl| pl.parameters().collect())
+        .unwrap_or_default();
+    for (i, p) in params.iter().enumerate() {
         if i > 0 {
             sig.push_str(", ");
         }
-        sig.push_str(&p.name.name);
-        if let Some(ty) = &p.ty {
+        sig.push_str(&token_name(p.name()));
+        if let Some(ty) = p.ty() {
             sig.push_str(": ");
-            sig.push_str(&format_type(ty));
+            sig.push_str(&format_type(&ty));
         }
     }
     sig.push(')');
-    if let Some(ret) = &m.return_type {
+    if let Some(ret) = m.return_type() {
         sig.push_str(": ");
-        sig.push_str(&format_type(ret));
+        sig.push_str(&format_type(&ret));
     }
     StdlibMember {
-        name: static_str(&m.name.name),
+        name: static_str(&token_name(m.name())),
         kind: MemberKind::Method,
         signature: static_str(&sig),
-        doc: doc_or_empty(m.doc_comment.as_deref()),
+        doc: doc_or_empty(m.doc_comment().as_deref()),
     }
 }
 
-fn has_modifier(mods: &[Modifier], kind: ModifierKind) -> bool {
-    mods.iter()
-        .any(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
+#[allow(dead_code)]
+fn leak_method(m: &MethodDecl) -> StdlibMember {
+    let mut sig = String::new();
+    sig.push_str(&token_name(m.name()));
+    let tps: Vec<TypeParameter> = m
+        .type_parameters()
+        .map(|tps| tps.parameters().collect())
+        .unwrap_or_default();
+    if !tps.is_empty() {
+        sig.push('<');
+        for (i, tp) in tps.iter().enumerate() {
+            if i > 0 {
+                sig.push_str(", ");
+            }
+            sig.push_str(&token_name(tp.name()));
+        }
+        sig.push('>');
+    }
+    sig.push('(');
+    let params: Vec<Parameter> = m
+        .parameters()
+        .map(|pl| pl.parameters().collect())
+        .unwrap_or_default();
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            sig.push_str(", ");
+        }
+        sig.push_str(&token_name(p.name()));
+        if let Some(ty) = p.ty() {
+            sig.push_str(": ");
+            sig.push_str(&format_type(&ty));
+        }
+    }
+    sig.push(')');
+    if let Some(ret) = m.return_type() {
+        sig.push_str(": ");
+        sig.push_str(&format_type(&ret));
+    }
+    StdlibMember {
+        name: static_str(&token_name(m.name())),
+        kind: MemberKind::Method,
+        signature: static_str(&sig),
+        doc: doc_or_empty(m.doc_comment().as_deref()),
+    }
+}
+
+fn token_name(t: Option<SyntaxToken>) -> String {
+    t.map(|t| cst::ident_text(&t)).unwrap_or_default()
 }
 
 fn doc_or_empty(doc: Option<&str>) -> &'static str {
@@ -155,70 +227,86 @@ fn static_str(s: &str) -> &'static str {
 // scrape free of an analyzer dependency. Mirrors the same canonical
 // shape so signatures match the hand-curated style.
 
-fn format_type(ty: &TypeRef) -> String {
+fn format_type(ty: &Type) -> String {
     let mut out = String::new();
     write_type(&mut out, ty);
     out
 }
 
-fn write_type(out: &mut String, ty: &TypeRef) {
+fn write_type(out: &mut String, ty: &Type) {
     match ty {
-        TypeRef::Named {
-            name, arguments, ..
-        } => {
-            for (i, seg) in name.segments.iter().enumerate() {
-                if i > 0 {
-                    out.push('.');
-                }
-                out.push_str(&seg.name);
+        Type::Named(n) => write_named_type(out, n),
+        Type::Nullable(n) => {
+            if let Some(inner) = n.inner() {
+                write_type(out, &inner);
             }
-            if !arguments.is_empty() {
-                out.push('<');
-                for (i, a) in arguments.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    write_type(out, a);
-                }
-                out.push('>');
-            }
-        }
-        TypeRef::Nullable { inner, .. } => {
-            write_type(out, inner);
             out.push('?');
         }
-        TypeRef::Union { members, .. } => {
-            for (i, m) in members.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(" | ");
-                }
-                write_type(out, m);
+        Type::Union(u) => write_union_type(out, u),
+        Type::Function(f) => write_function_type(out, f),
+        Type::Parenthesized(p) => write_parenthesized_type(out, p),
+        Type::StringLiteral(s) => {
+            if let Some(t) = s.token() {
+                out.push_str(t.text());
             }
         }
-        TypeRef::Function {
-            parameters, result, ..
-        } => {
-            out.push('(');
-            for (i, p) in parameters.iter().enumerate() {
+        Type::Unknown(_) => out.push_str("unknown"),
+        Type::Nothing(_) => out.push_str("nothing"),
+        Type::Module(_) => out.push_str("module"),
+        Type::Error(_) => out.push_str("<error>"),
+    }
+}
+
+fn write_named_type(out: &mut String, n: &NamedType) {
+    if let Some(name) = n.name() {
+        out.push_str(&name.text_joined());
+    }
+    if let Some(args) = n.type_arguments() {
+        let arguments: Vec<Type> = args.arguments().collect();
+        if !arguments.is_empty() {
+            out.push('<');
+            for (i, a) in arguments.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_type(out, p);
+                write_type(out, a);
             }
-            out.push_str(") -> ");
-            write_type(out, result);
+            out.push('>');
         }
-        TypeRef::Parenthesized { inner, .. } => {
-            out.push('(');
-            write_type(out, inner);
-            out.push(')');
-        }
-        TypeRef::StringLiteral(s) => out.push_str(&s.raw),
-        TypeRef::Unknown(_) => out.push_str("unknown"),
-        TypeRef::Nothing(_) => out.push_str("nothing"),
-        TypeRef::Module(_) => out.push_str("module"),
-        TypeRef::Error { .. } => out.push_str("<error>"),
     }
+}
+
+fn write_union_type(out: &mut String, u: &UnionType) {
+    let members: Vec<Type> = u.members().collect();
+    for (i, m) in members.iter().enumerate() {
+        if i > 0 {
+            out.push_str(" | ");
+        }
+        write_type(out, m);
+    }
+}
+
+fn write_function_type(out: &mut String, f: &FunctionType) {
+    out.push('(');
+    let params: Vec<Type> = f.parameters().collect();
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_type(out, p);
+    }
+    out.push_str(") -> ");
+    if let Some(r) = f.result() {
+        write_type(out, &r);
+    }
+}
+
+fn write_parenthesized_type(out: &mut String, p: &ParenthesizedType) {
+    out.push('(');
+    if let Some(inner) = p.inner() {
+        write_type(out, &inner);
+    }
+    out.push(')');
 }
 
 #[cfg(test)]

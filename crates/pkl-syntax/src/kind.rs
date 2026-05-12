@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum SyntaxKind {
     // Trivia ----------------------------------------------------------------
@@ -126,6 +126,8 @@ pub enum SyntaxKind {
     Annotation,
     ModifierList,
     Modifier,
+    /// A dotted name in type or annotation position (e.g. `acme.config.Foo`).
+    QualifiedName,
 
     ClassDecl,
     ClassBody,
@@ -194,6 +196,28 @@ pub enum SyntaxKind {
     /// Catch-all node emitted by the parser when it could not make sense of
     /// some span. Carries an error message.
     ErrorNode,
+
+    // Sentinel: must remain the last variant. Used by the rowan
+    // `Language` impl to validate raw kinds. Adding a new variant?
+    // Insert it above this line.
+    #[doc(hidden)]
+    __Last,
+}
+
+impl SyntaxKind {
+    /// Safely convert a raw `u16` (as carried by `rowan::SyntaxKind`)
+    /// into a `SyntaxKind`. Returns `None` when the raw value falls
+    /// outside the enum range — useful for guarded conversions.
+    pub fn from_raw(raw: u16) -> Option<Self> {
+        if raw >= SyntaxKind::__Last as u16 {
+            None
+        } else {
+            // SAFETY: `SyntaxKind` is `#[repr(u16)]` and `raw` is bounded
+            // above by the sentinel `__Last`, so every value in range is
+            // a valid discriminant.
+            Some(unsafe { std::mem::transmute::<u16, SyntaxKind>(raw) })
+        }
+    }
 }
 
 impl SyntaxKind {

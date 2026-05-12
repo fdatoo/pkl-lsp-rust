@@ -133,7 +133,10 @@ mod tests {
     fn empty_resolution() -> Resolution {
         // Build via the public entry point so we get the same shape as
         // the analyzer's real output (with the stdlib seeded).
-        crate::resolve_module(&pkl_syntax::parse("").module)
+        use pkl_syntax::cst::{AstNode, Module};
+        let parsed = pkl_syntax::parse("");
+        let module = Module::cast(parsed.syntax()).expect("module");
+        crate::resolve_module(&module)
     }
 
     #[test]

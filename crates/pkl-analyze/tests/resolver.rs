@@ -3,6 +3,7 @@
 use pkl_analyze::hover::hover_markdown;
 use pkl_analyze::resolve_module;
 use pkl_analyze::SymbolKind;
+use pkl_syntax::cst::{AstNode, Module};
 use pkl_syntax::parse;
 
 /// Helper that runs the parser + resolver and asserts there were no syntax
@@ -15,7 +16,8 @@ fn resolve(src: &str) -> pkl_analyze::Resolution {
         parsed.diagnostics,
         src
     );
-    resolve_module(&parsed.module)
+    let module = Module::cast(parsed.syntax()).expect("module root");
+    resolve_module(&module)
 }
 
 /// Returns the byte offset of the first occurrence of `needle` in `src`.

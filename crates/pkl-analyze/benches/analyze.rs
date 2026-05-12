@@ -35,7 +35,7 @@ fn bench_analyze(c: &mut Criterion) {
     group.bench_function("small", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(SMALL));
-            let a = pkl_analyze::analyze(&r.module, r.diagnostics);
+            let a = pkl_analyze::analyze(&r.syntax(), r.diagnostics);
             black_box(a.resolution.symbols.len());
         })
     });
@@ -43,7 +43,7 @@ fn bench_analyze(c: &mut Criterion) {
     group.bench_function("large_16x", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(&large));
-            let a = pkl_analyze::analyze(&r.module, r.diagnostics);
+            let a = pkl_analyze::analyze(&r.syntax(), r.diagnostics);
             black_box(a.resolution.symbols.len());
         })
     });
@@ -51,7 +51,7 @@ fn bench_analyze(c: &mut Criterion) {
     group.bench_function("pkl.base", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(stdlib));
-            let a = pkl_analyze::analyze(&r.module, r.diagnostics);
+            let a = pkl_analyze::analyze(&r.syntax(), r.diagnostics);
             black_box(a.resolution.symbols.len());
         })
     });

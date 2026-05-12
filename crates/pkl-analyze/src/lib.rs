@@ -23,8 +23,8 @@ pub mod subtyping;
 pub mod symbols;
 pub mod types;
 
-use pkl_syntax::ast::Module;
-use pkl_syntax::SyntaxDiagnostic;
+use pkl_syntax::cst::{AstNode, Module};
+use pkl_syntax::{SyntaxDiagnostic, SyntaxNode};
 
 pub use infer::{infer_module, Inference, MemberRef};
 #[cfg(feature = "remote")]
@@ -44,9 +44,12 @@ pub struct Analysis {
     pub diagnostics: Vec<SyntaxDiagnostic>,
 }
 
-pub fn analyze(module: &Module, syntax_diagnostics: Vec<SyntaxDiagnostic>) -> Analysis {
-    let resolution = resolve_module(module);
-    let inference = infer_module(module, &resolution);
+/// Run the resolver + inferrer over `syntax` (the lossless tree's root)
+/// and bundle the outputs with the parser's syntax diagnostics.
+pub fn analyze(syntax: &SyntaxNode, syntax_diagnostics: Vec<SyntaxDiagnostic>) -> Analysis {
+    let module = Module::cast(syntax.clone()).expect("syntax root must be a Module node");
+    let resolution = resolve_module(&module);
+    let inference = infer_module(&module, &resolution);
     let mut diagnostics = syntax_diagnostics;
     diagnostics.extend(inference.diagnostics.iter().cloned());
     Analysis {

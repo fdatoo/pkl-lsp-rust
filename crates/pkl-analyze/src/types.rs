@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use pkl_syntax::ast::TypeRef;
+use pkl_syntax::cst;
 
 /// A type known to the analyzer. Variants line up roughly with
 /// [`pkl_stdlib`] entries plus structural forms.
@@ -121,34 +121,47 @@ impl Ty {
         })
     }
 
-    /// Convert an AST [`TypeRef`] to an internal [`Ty`]. Anything we can't
-    /// recognise becomes [`Ty::Named`] so the analyzer can still reason
-    /// about its identity.
-    pub fn from_type_ref(ty: &TypeRef) -> Ty {
+    /// Convert a CST [`cst::Type`] to an internal [`Ty`]. Anything we
+    /// can't recognise becomes [`Ty::Named`] so the analyzer can still
+    /// reason about its identity.
+    pub fn from_cst_type(ty: &cst::Type) -> Ty {
         match ty {
-            TypeRef::Named {
-                name, arguments, ..
-            } => {
-                let bare = name.segments.last().map(|s| s.name.as_str()).unwrap_or("");
-                let args: Vec<Ty> = arguments.iter().map(Ty::from_type_ref).collect();
-                build_named(bare, args)
+            cst::Type::Named(n) => {
+                let bare = n
+                    .name()
+                    .and_then(|qn| qn.segments().last().map(|t| cst::ident_text(&t)))
+                    .unwrap_or_default();
+                let args: Vec<Ty> = n
+                    .type_arguments()
+                    .map(|tal| tal.arguments().map(|t| Ty::from_cst_type(&t)).collect())
+                    .unwrap_or_default();
+                build_named(&bare, args)
             }
-            TypeRef::Nullable { inner, .. } => Ty::Nullable(Box::new(Ty::from_type_ref(inner))),
-            TypeRef::Union { members, .. } => {
-                Ty::Union(members.iter().map(Ty::from_type_ref).collect())
+            cst::Type::Nullable(n) => {
+                let inner = n
+                    .inner()
+                    .map(|t| Ty::from_cst_type(&t))
+                    .unwrap_or(Ty::Unknown);
+                Ty::Nullable(Box::new(inner))
             }
-            TypeRef::Function {
-                parameters, result, ..
-            } => Ty::Function {
-                params: parameters.iter().map(Ty::from_type_ref).collect(),
-                ret: Box::new(Ty::from_type_ref(result)),
+            cst::Type::Union(u) => Ty::Union(u.members().map(|t| Ty::from_cst_type(&t)).collect()),
+            cst::Type::Function(f) => Ty::Function {
+                params: f.parameters().map(|t| Ty::from_cst_type(&t)).collect(),
+                ret: Box::new(
+                    f.result()
+                        .map(|t| Ty::from_cst_type(&t))
+                        .unwrap_or(Ty::Unknown),
+                ),
             },
-            TypeRef::Parenthesized { inner, .. } => Ty::from_type_ref(inner),
-            TypeRef::StringLiteral(_) => Ty::Str,
-            TypeRef::Unknown(_) => Ty::Unknown,
-            TypeRef::Nothing(_) => Ty::Nothing,
-            TypeRef::Module(_) => Ty::Module,
-            TypeRef::Error { .. } => Ty::Unknown,
+            cst::Type::Parenthesized(p) => p
+                .inner()
+                .map(|t| Ty::from_cst_type(&t))
+                .unwrap_or(Ty::Unknown),
+            cst::Type::StringLiteral(_) => Ty::Str,
+            cst::Type::Unknown(_) => Ty::Unknown,
+            cst::Type::Nothing(_) => Ty::Nothing,
+            cst::Type::Module(_) => Ty::Module,
+            cst::Type::Error(_) => Ty::Unknown,
         }
     }
 

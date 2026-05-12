@@ -104,7 +104,7 @@ impl ModuleGraph {
 
         // Parse + analyse the supplied source.
         let parsed = parse(&source);
-        let analysis = analyze(&parsed.module, parsed.diagnostics.clone());
+        let analysis = analyze(&parsed.syntax(), parsed.diagnostics.clone());
 
         // Resolve imports.
         let mut import_targets: HashMap<String, ModuleUri> = HashMap::new();

@@ -10,6 +10,7 @@ description = "Lexer, parser, and syntax tree for the Pkl configuration language
 [dependencies]
 thiserror = { workspace = true }
 unicode-ident = "1"
+rowan = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }

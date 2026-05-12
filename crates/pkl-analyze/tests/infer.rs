@@ -12,7 +12,7 @@ fn analyze_clean(src: &str) -> pkl_analyze::Analysis {
         parsed.diagnostics,
         src
     );
-    analyze(&parsed.module, parsed.diagnostics)
+    analyze(&parsed.syntax(), parsed.diagnostics)
 }
 
 /// Byte offset of the first occurrence of `needle` in `src`.
@@ -168,7 +168,7 @@ fn unknown_receiver_records_member_but_no_resolution() {
     // Unresolved identifier — we don't know its type.
     let src = "x = unknownThing.foo";
     let parsed = parse(src);
-    let a = analyze(&parsed.module, parsed.diagnostics);
+    let a = analyze(&parsed.syntax(), parsed.diagnostics);
     let member = a
         .inference
         .member_ref_touching(offset_of(src, "foo"))
@@ -233,7 +233,7 @@ fn qualified_type_name_records_member_ref() {
     let src = r#"import "other.pkl" as other
 x: other.Thing = unknownThing"#;
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     // The `Thing` segment in the type annotation — find via `.Thing`.
     let thing_offset = (src.find(".Thing").unwrap() + 1) as u32;
     let member = a
@@ -271,7 +271,7 @@ class Dog extends Animal {}
 class Puppy extends Dog {}
 "#;
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     let dog = pkl_analyze::Ty::Named {
         name: "Dog".into(),
         args: vec![],
@@ -293,7 +293,7 @@ class Puppy extends Dog {}
 fn method_body_return_type_diagnostic() {
     let src = "function f(): Int = \"oops\"";
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     let msgs: Vec<&str> = a.diagnostics.iter().map(|d| d.message.as_str()).collect();
     assert!(
         msgs.iter().any(|m| m.contains("type mismatch")),
@@ -447,7 +447,7 @@ fn map_substitutes_lambda_return_type() {
 fn diagnostic_for_type_mismatch_in_property() {
     let src = "name: String = 42";
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     let msgs: Vec<&str> = a.diagnostics.iter().map(|d| d.message.as_str()).collect();
     assert!(
         msgs.iter().any(|m| m.contains("type mismatch")),
@@ -461,7 +461,7 @@ fn no_diagnostic_when_inferrer_is_unsure() {
     // `unknownThing` has no type — be permissive.
     let src = "name: String = unknownThing";
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     assert!(
         !a.diagnostics
             .iter()
@@ -475,7 +475,7 @@ fn no_diagnostic_when_inferrer_is_unsure() {
 fn nullable_accepts_concrete_value() {
     let src = "name: String? = \"a\"";
     let parsed = pkl_syntax::parse(src);
-    let a = pkl_analyze::analyze(&parsed.module, parsed.diagnostics);
+    let a = pkl_analyze::analyze(&parsed.syntax(), parsed.diagnostics);
     let msgs: Vec<&str> = a.diagnostics.iter().map(|d| d.message.as_str()).collect();
     assert!(msgs.is_empty(), "got diagnostics: {:?}", msgs);
 }

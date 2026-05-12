@@ -8,8 +8,8 @@ depends only on the crates to its left in this diagram:
 ┌──────────────┐      ┌──────────────┐
 │ pkl-syntax   │◄─────│ pkl-stdlib   │
 │ (lexer +     │      │ (vendored    │
-│  parser +    │      │  pkl.base    │
-│  AST +       │      │  + bundled   │
+│  parsers +   │      │  pkl.base    │
+│  AST + CST + │      │  + bundled   │
 │  formatter)  │      │  modules)    │
 └──────┬───────┘      └──────┬───────┘
        │                     │
@@ -35,14 +35,37 @@ depends only on the crates to its left in this diagram:
 
 Pure lexer + parser + AST + formatter. No analysis state, no I/O.
 
-* `lexer.rs` is a hand-rolled byte-streaming lexer with `unicode-ident` for
-  XID classification. It produces a flat `Vec<Token>` and preserves trivia
-  (whitespace, comments) so the layer above can decide what to ignore.
-* `parser.rs` is a recursive-descent parser that produces a typed `ast`
-  tree with byte-offset `Span`s on every node and recoverable error nodes
-  on bad input.
-* `format.rs` re-emits the AST as canonical Pkl text for the LSP's
-  formatting handler.
+The lossless rowan tree is the single source of truth; the typed AST
+is materialized off it on every parse.
+
+* `lexer.rs` is a hand-rolled byte-streaming lexer with `unicode-ident`
+  for XID classification. It produces a flat `Vec<Token>` and preserves
+  trivia (whitespace, comments) so the layer above can decide what to
+  ignore.
+* `green.rs` is the parser. It drives a `rowan::GreenNodeBuilder` over
+  the lexer's token stream and produces a red-green syntax tree in
+  which every byte of the original source (trivia included) is
+  represented. `parse_green(src).syntax.text() == src` for any input.
+* `syntax.rs` ties the `SyntaxKind` enum to `rowan::Language` and
+  exports `SyntaxNode` / `SyntaxToken` / `SyntaxElement` aliases.
+* `cst.rs` is the typed view over the lossless tree: zero-cost newtype
+  wrappers around `SyntaxNode` (e.g. `Module`, `ClassDecl`, `Expr`)
+  with accessor methods that walk the tree on demand. Includes
+  `doc_comment_for(node)` which recovers `///` comments out of the
+  declaration's leading trivia (descending through wrapper nodes like
+  `ModifierList` so doc comments still attach when modifiers are
+  present).
+* `parser.rs` exposes the public `parse(src) -> ParseResult` entry
+  point. `ParseResult` carries the immutable `GreenNode` (so the
+  result can live in `Send + Sync` shared state) plus any diagnostics.
+  Call `parsed.syntax()` to obtain a fresh thread-local red-tree root
+  for walking; `cst::Module::cast(parsed.syntax())` then yields the
+  typed module view. There is no separate owned AST — every consumer
+  walks the lossless tree directly.
+* `format.rs` re-emits canonical Pkl text by walking the typed CST
+  view. Ordinary `//` and `/* ... */` comments — not just `///` doc
+  comments — are preserved verbatim at every declaration boundary
+  (module items, class members, object members).
 
 ### `pkl-stdlib`
 
@@ -67,7 +90,7 @@ through small typed handoffs rather than a shared `Db`:
 * `module_graph.rs` — owns one `ModuleEntry` per known module
   (open or transitively imported), with import targets and a dependents
   index so editing one file can refresh consumers.
-* `resolver.rs` — single-file pass that walks the AST and builds:
+* `resolver.rs` — single-file pass that walks the CST and builds:
   - `SymbolTable` of every declaration (`Class`, `Property`, `Method`,
     `Parameter`, `LetBinding`, `ForBinding`, `ObjectParameter`,
     `Import`, `TypeParameter`, `TypeAlias`).
@@ -156,12 +179,35 @@ queries the LSP shortcuts through the document's cached analysis.
 * `ModuleEntry` — graph entry for one module: source, `Analysis`,
   `import_targets`, `import_errors`, `is_open`.
 
+## Lossless tree architecture
+
+The lossless `rowan`-backed syntax tree is the single source of truth
+for parsing **and** consumption. There is no separate owned AST — the
+analyzer, LSP feature handlers, the formatter, and the stdlib scraper
+all walk the lossless tree through the typed wrappers in `cst`.
+
+Span identities are preserved across the whole stack by
+`cst::significant_span(node)`, which excludes leading and trailing
+trivia from a node's range. Callers that key into the analyzer's
+offset maps (`Inference::expr_types`, `Resolution::by_span_start`)
+use that helper so the hand-rolled parser's old "spans bracket
+significant tokens" invariant still holds.
+
+Key pieces:
+
+* Lossless parser (`green::parse_green`), red-green tree plumbing
+  (`syntax`), typed wrappers (`cst`), and the round-trip +
+  smoke-fuzz test suite.
+* Comment-preserving formatter (`format::format_module`) walking the
+  CST view.
+* Doc-comment recovery via `cst::doc_comment_for(node)`.
+* `pkl-analyze::resolve_module` and `infer_module` accept a
+  `cst::Module`. The public `analyze(syntax, diagnostics)` entry
+  point takes the rowan `SyntaxNode` directly and constructs the
+  typed module on the way in.
+
 ## Non-goals (for now)
 
-* A lossless syntax tree. The typed AST drops ordinary `// ...` and
-  `/* ... */` comments. The formatter and some refactorings would
-  benefit from a `rowan`-style tree but that's a substantial rewrite
-  and isn't on the critical path for editor UX.
 * A full Hindley-Milner type checker. The inferrer is single-pass and
   greedy. Generic substitution is best-effort; subtyping is
   conservative so we never lie to the user with a false positive.

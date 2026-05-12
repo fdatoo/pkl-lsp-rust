@@ -60,14 +60,18 @@ fn bench_parse(c: &mut Criterion) {
     group.bench_function("small", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(SMALL));
-            black_box(r.module.items.len());
+            use pkl_syntax::cst::{AstNode, Module};
+            let module = Module::cast(r.syntax()).unwrap();
+            black_box(module.items().count());
         })
     });
     group.throughput(Throughput::Bytes(large.len() as u64));
     group.bench_function("large_32x", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(&large));
-            black_box(r.module.items.len());
+            use pkl_syntax::cst::{AstNode, Module};
+            let module = Module::cast(r.syntax()).unwrap();
+            black_box(module.items().count());
         })
     });
     group.finish();
@@ -82,7 +86,9 @@ fn bench_stdlib_base(c: &mut Criterion) {
     group.bench_function("base.pkl", |b| {
         b.iter(|| {
             let r = pkl_syntax::parse(black_box(source));
-            black_box(r.module.items.len());
+            use pkl_syntax::cst::{AstNode, Module};
+            let module = Module::cast(r.syntax()).unwrap();
+            black_box(module.items().count());
         })
     });
     group.finish();

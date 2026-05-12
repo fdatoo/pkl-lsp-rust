@@ -1,4 +1,4 @@
-//! Resolver: walks the AST, builds the symbol table and lexical scopes,
+//! Resolver: walks the CST, builds the symbol table and lexical scopes,
 //! and records every name reference site with the symbol it resolves to.
 //!
 //! This is a single-file, single-pass resolver intended as the foundation
@@ -18,8 +18,13 @@
 
 use std::collections::HashMap;
 
-use pkl_syntax::ast::*;
+use pkl_syntax::cst::{
+    self, ident_text, significant_span, token_span, AstNode, ClassDecl, ClassMember, Expr,
+    ImportClause, Item, MethodDecl, Module, ObjectBody, ObjectMember, Parameter, PropertyDecl,
+    PropertyValue, Type, TypeAliasDecl, TypeParameter,
+};
 use pkl_syntax::span::Span;
+use pkl_syntax::SyntaxToken;
 
 use pkl_stdlib::{self, render_type_signature, StdlibType};
 
@@ -160,41 +165,45 @@ impl Resolver {
 
     fn declare_module(&mut self, module: &Module, scope: ScopeId) {
         // First pass: register every top-level name so forward references work.
-        for import in &module.imports {
-            self.declare_import(import, scope);
+        for import in module.imports() {
+            self.declare_import(&import, scope);
         }
         // Two-step pass over items: declare first so order doesn't matter.
-        let mut item_symbols: Vec<Option<SymbolId>> = Vec::with_capacity(module.items.len());
-        for item in &module.items {
+        let items: Vec<Item> = module.items().collect();
+        let mut item_symbols: Vec<Option<SymbolId>> = Vec::with_capacity(items.len());
+        for item in &items {
             item_symbols.push(self.declare_item_header(item, scope));
         }
         // Second pass: walk bodies and resolve references.
-        for (item, container) in module.items.iter().zip(item_symbols.iter()) {
+        for (item, container) in items.iter().zip(item_symbols.iter()) {
             self.resolve_item(item, scope, *container);
         }
     }
 
-    fn declare_import(&mut self, import: &Import, scope: ScopeId) {
-        // The local name is the alias if present, else derived from the path.
-        let (local_name, local_span) = import
-            .alias
-            .as_ref()
-            .map(|a| (a.name.clone(), a.span))
-            .unwrap_or_else(|| {
-                let derived = derive_import_name(&import.path.raw);
-                (derived, import.path.span)
-            });
+    fn declare_import(&mut self, import: &ImportClause, scope: ScopeId) {
+        let path_tok = match import.path() {
+            Some(t) => t,
+            None => return,
+        };
+        let path_raw = path_tok.text().to_string();
+        let import_span = significant_span(import.syntax());
+        let alias_tok = import.alias();
+
+        let (local_name, local_span) = match alias_tok.as_ref() {
+            Some(a) => (ident_text(a), token_span(a)),
+            None => (derive_import_name(&path_raw), token_span(&path_tok)),
+        };
         let symbol_id = self.insert_symbol(
             scope,
             SymbolData {
                 kind: SymbolKind::Import {
-                    is_glob: import.is_glob,
+                    is_glob: import.is_glob(),
                 },
                 name: local_name.clone(),
                 name_span: local_span,
-                full_span: import.span,
+                full_span: import_span,
                 container: None,
-                signature: Some(import.path.raw.clone()),
+                signature: Some(path_raw.clone()),
                 doc: None,
                 modifiers: Vec::new(),
                 origin: Origin::User,
@@ -202,13 +211,13 @@ impl Resolver {
                 declared_ty: Ty::Module,
             },
         );
-        let raw_path = strip_string_quotes(&import.path.raw);
+        let raw_path = strip_string_quotes(&path_raw);
         self.imports.insert(
             local_name.clone(),
             ImportInfo {
                 local_name,
                 raw_path,
-                is_glob: import.is_glob,
+                is_glob: import.is_glob(),
                 symbol_id,
                 local_name_span: local_span,
             },
@@ -221,17 +230,17 @@ impl Resolver {
                 scope,
                 SymbolData {
                     kind: SymbolKind::Class,
-                    name: c.name.name.clone(),
-                    name_span: c.name.span,
-                    full_span: c.span,
+                    name: name_token_text(c.name()),
+                    name_span: token_span_or_empty(c.name()),
+                    full_span: significant_span(c.syntax()),
                     container: None,
                     signature: Some(format_class_signature(c)),
-                    doc: c.doc_comment.clone(),
-                    modifiers: modifier_kinds(&c.modifiers),
+                    doc: c.doc_comment(),
+                    modifiers: modifier_kinds(c),
                     origin: Origin::User,
-                    parent_class: extends_class_name(c.extends.as_ref()),
+                    parent_class: extends_class_name(c.extends().as_ref()),
                     declared_ty: Ty::Named {
-                        name: c.name.name.clone(),
+                        name: name_token_text(c.name()),
                         args: Vec::new(),
                     },
                 },
@@ -241,57 +250,63 @@ impl Resolver {
                     scope,
                     SymbolData {
                         kind: SymbolKind::TypeAlias,
-                        name: t.name.name.clone(),
-                        name_span: t.name.span,
-                        full_span: t.span,
+                        name: name_token_text(t.name()),
+                        name_span: token_span_or_empty(t.name()),
+                        full_span: significant_span(t.syntax()),
                         container: None,
                         signature: Some(format_typealias_signature(t)),
-                        doc: t.doc_comment.clone(),
-                        modifiers: modifier_kinds(&t.modifiers),
+                        doc: t.doc_comment(),
+                        modifiers: modifier_kinds(t),
                         origin: Origin::User,
                         parent_class: None,
                         declared_ty: t
-                            .aliased
+                            .aliased_type()
                             .as_ref()
-                            .map(Ty::from_type_ref)
+                            .map(Ty::from_cst_type)
                             .unwrap_or(Ty::Unknown),
                     },
                 ),
             ),
-            Item::Property(p) => Some(self.insert_symbol(
-                scope,
-                SymbolData {
-                    kind: SymbolKind::Property,
-                    name: p.name.name.clone(),
-                    name_span: p.name.span,
-                    full_span: p.span,
-                    container: None,
-                    signature: Some(format_property_signature(p)),
-                    doc: p.doc_comment.clone(),
-                    modifiers: modifier_kinds(&p.modifiers),
-                    origin: Origin::User,
-                    parent_class: None,
-                    declared_ty: p.ty.as_ref().map(Ty::from_type_ref).unwrap_or(Ty::Unknown),
-                },
-            )),
+            Item::Property(p) => Some(
+                self.insert_symbol(
+                    scope,
+                    SymbolData {
+                        kind: SymbolKind::Property,
+                        name: name_token_text(p.name()),
+                        name_span: token_span_or_empty(p.name()),
+                        full_span: significant_span(p.syntax()),
+                        container: None,
+                        signature: Some(format_property_signature(p.syntax())),
+                        doc: p.doc_comment(),
+                        modifiers: modifier_kinds(p),
+                        origin: Origin::User,
+                        parent_class: None,
+                        declared_ty: p
+                            .ty()
+                            .as_ref()
+                            .map(Ty::from_cst_type)
+                            .unwrap_or(Ty::Unknown),
+                    },
+                ),
+            ),
             Item::Method(m) => Some(
                 self.insert_symbol(
                     scope,
                     SymbolData {
                         kind: SymbolKind::Method,
-                        name: m.name.name.clone(),
-                        name_span: m.name.span,
-                        full_span: m.span,
+                        name: name_token_text(m.name()),
+                        name_span: token_span_or_empty(m.name()),
+                        full_span: significant_span(m.syntax()),
                         container: None,
                         signature: Some(format_method_signature(m)),
-                        doc: m.doc_comment.clone(),
-                        modifiers: modifier_kinds(&m.modifiers),
+                        doc: m.doc_comment(),
+                        modifiers: modifier_kinds(m),
                         origin: Origin::User,
                         parent_class: None,
                         declared_ty: m
-                            .return_type
+                            .return_type()
                             .as_ref()
-                            .map(Ty::from_type_ref)
+                            .map(Ty::from_cst_type)
                             .unwrap_or(Ty::Unknown),
                     },
                 ),
@@ -316,86 +331,118 @@ impl Resolver {
         parent_scope: ScopeId,
         _container: Option<SymbolId>,
     ) {
-        let class_sym = self.scopes.lookup(parent_scope, &c.name.name);
+        let class_name = name_token_text(c.name());
+        let class_sym = self.scopes.lookup(parent_scope, &class_name);
         // Class scope holds type parameters and members.
         let class_scope = self.scopes.alloc(Some(parent_scope));
-        self.declare_type_parameters(&c.type_parameters, class_scope);
-        if let Some(ext) = &c.extends {
+        let type_params: Vec<TypeParameter> = c
+            .type_parameters()
+            .map(|tp| tp.parameters().collect())
+            .unwrap_or_default();
+        self.declare_type_parameters(&type_params, class_scope);
+        if let Some(ext) = &c.extends() {
             self.resolve_type(ext, class_scope);
         }
+        let members: Vec<ClassMember> = c.body().map(|b| b.members().collect()).unwrap_or_default();
         let mut member_ids: Vec<Option<SymbolId>> = Vec::new();
-        if let Some(body) = &c.body {
-            for member in &body.members {
-                let id = match member {
-                    ClassMember::Property(p) => Some(self.insert_symbol(
+        for member in &members {
+            let id = match member {
+                ClassMember::Property(p) => Some(
+                    self.insert_symbol(
                         class_scope,
                         SymbolData {
                             kind: SymbolKind::Property,
-                            name: p.name.name.clone(),
-                            name_span: p.name.span,
-                            full_span: p.span,
+                            name: name_token_text(p.name()),
+                            name_span: token_span_or_empty(p.name()),
+                            full_span: significant_span(p.syntax()),
                             container: class_sym,
-                            signature: Some(format_property_signature(p)),
-                            doc: p.doc_comment.clone(),
-                            modifiers: modifier_kinds(&p.modifiers),
+                            signature: Some(format_property_signature(p.syntax())),
+                            doc: p.doc_comment(),
+                            modifiers: modifier_kinds(p),
                             origin: Origin::User,
                             parent_class: None,
-                            declared_ty:
-                                p.ty.as_ref().map(Ty::from_type_ref).unwrap_or(Ty::Unknown),
+                            declared_ty: p
+                                .ty()
+                                .as_ref()
+                                .map(Ty::from_cst_type)
+                                .unwrap_or(Ty::Unknown),
                         },
-                    )),
-                    ClassMember::Method(m) => Some(
-                        self.insert_symbol(
-                            class_scope,
-                            SymbolData {
-                                kind: SymbolKind::Method,
-                                name: m.name.name.clone(),
-                                name_span: m.name.span,
-                                full_span: m.span,
-                                container: class_sym,
-                                signature: Some(format_method_signature(m)),
-                                doc: m.doc_comment.clone(),
-                                modifiers: modifier_kinds(&m.modifiers),
-                                origin: Origin::User,
-                                parent_class: None,
-                                declared_ty: m
-                                    .return_type
-                                    .as_ref()
-                                    .map(Ty::from_type_ref)
-                                    .unwrap_or(Ty::Unknown),
-                            },
-                        ),
                     ),
-                };
-                member_ids.push(id);
-            }
-            for (member, _) in body.members.iter().zip(member_ids.iter()) {
-                match member {
-                    ClassMember::Property(p) => self.resolve_property(p, class_scope, class_sym),
-                    ClassMember::Method(m) => self.resolve_method(m, class_scope, class_sym),
-                }
+                ),
+                ClassMember::Method(m) => Some(
+                    self.insert_symbol(
+                        class_scope,
+                        SymbolData {
+                            kind: SymbolKind::Method,
+                            name: name_token_text(m.name()),
+                            name_span: token_span_or_empty(m.name()),
+                            full_span: significant_span(m.syntax()),
+                            container: class_sym,
+                            signature: Some(format_class_method_signature(m)),
+                            doc: m.doc_comment(),
+                            modifiers: modifier_kinds(m),
+                            origin: Origin::User,
+                            parent_class: None,
+                            declared_ty: m
+                                .return_type()
+                                .as_ref()
+                                .map(Ty::from_cst_type)
+                                .unwrap_or(Ty::Unknown),
+                        },
+                    ),
+                ),
+            };
+            member_ids.push(id);
+        }
+        for (member, _) in members.iter().zip(member_ids.iter()) {
+            match member {
+                ClassMember::Property(p) => self.resolve_class_property(p, class_scope, class_sym),
+                ClassMember::Method(m) => self.resolve_class_method(m, class_scope, class_sym),
             }
         }
     }
 
     fn resolve_typealias(&mut self, t: &TypeAliasDecl, parent_scope: ScopeId) {
         let scope = self.scopes.alloc(Some(parent_scope));
-        self.declare_type_parameters(&t.type_parameters, scope);
-        if let Some(aliased) = &t.aliased {
-            self.resolve_type(aliased, scope);
+        let type_params: Vec<TypeParameter> = t
+            .type_parameters()
+            .map(|tp| tp.parameters().collect())
+            .unwrap_or_default();
+        self.declare_type_parameters(&type_params, scope);
+        if let Some(aliased) = t.aliased_type() {
+            self.resolve_type(&aliased, scope);
         }
     }
 
     fn resolve_property(&mut self, p: &PropertyDecl, scope: ScopeId, _container: Option<SymbolId>) {
-        for a in &p.annotations {
-            self.resolve_annotation(a, scope);
+        for a in p.annotations() {
+            self.resolve_annotation(&a, scope);
         }
-        if let Some(ty) = &p.ty {
-            self.resolve_type(ty, scope);
+        if let Some(ty) = p.ty() {
+            self.resolve_type(&ty, scope);
         }
-        match &p.value {
-            Some(PropertyValue::Expr(e)) => self.resolve_expr(e, scope),
-            Some(PropertyValue::ObjectBody(body)) => self.resolve_object_body(body, scope),
+        match p.value() {
+            Some(PropertyValue::Expr(e)) => self.resolve_expr(&e, scope),
+            Some(PropertyValue::ObjectBody(body)) => self.resolve_object_body(&body, scope),
+            None => {}
+        }
+    }
+
+    fn resolve_class_property(
+        &mut self,
+        p: &cst::ClassPropertyDecl,
+        scope: ScopeId,
+        _container: Option<SymbolId>,
+    ) {
+        for a in p.annotations() {
+            self.resolve_annotation(&a, scope);
+        }
+        if let Some(ty) = p.ty() {
+            self.resolve_type(&ty, scope);
+        }
+        match p.value() {
+            Some(PropertyValue::Expr(e)) => self.resolve_expr(&e, scope),
+            Some(PropertyValue::ObjectBody(body)) => self.resolve_object_body(&body, scope),
             None => {}
         }
     }
@@ -407,42 +454,128 @@ impl Resolver {
         _container: Option<SymbolId>,
     ) {
         let scope = self.scopes.alloc(Some(parent_scope));
-        for a in &m.annotations {
-            self.resolve_annotation(a, scope);
+        for a in m.annotations() {
+            self.resolve_annotation(&a, scope);
         }
-        self.declare_type_parameters(&m.type_parameters, scope);
-        self.declare_parameters(&m.parameters, scope);
-        for p in &m.parameters {
-            if let Some(ty) = &p.ty {
-                self.resolve_type(ty, scope);
+        let type_params: Vec<TypeParameter> = m
+            .type_parameters()
+            .map(|tp| tp.parameters().collect())
+            .unwrap_or_default();
+        self.declare_type_parameters(&type_params, scope);
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        self.declare_parameters(&params, scope);
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.resolve_type(&ty, scope);
             }
         }
-        if let Some(ret) = &m.return_type {
-            self.resolve_type(ret, scope);
+        if let Some(ret) = m.return_type() {
+            self.resolve_type(&ret, scope);
         }
-        if let Some(body) = &m.body {
-            self.resolve_expr(body, scope);
+        if let Some(body) = m.body() {
+            self.resolve_expr(&body, scope);
         }
     }
 
-    fn resolve_annotation(&mut self, a: &Annotation, scope: ScopeId) {
-        if let Some(head) = a.name.segments.first() {
-            self.resolve_ident_in_scope(scope, &head.name, head.span);
+    fn resolve_class_method(
+        &mut self,
+        m: &cst::ClassMethodDecl,
+        parent_scope: ScopeId,
+        _container: Option<SymbolId>,
+    ) {
+        let scope = self.scopes.alloc(Some(parent_scope));
+        for a in m.annotations() {
+            self.resolve_annotation(&a, scope);
         }
-        if let Some(body) = &a.body {
-            self.resolve_object_body(body, scope);
+        let type_params: Vec<TypeParameter> = m
+            .type_parameters()
+            .map(|tp| tp.parameters().collect())
+            .unwrap_or_default();
+        self.declare_type_parameters(&type_params, scope);
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        self.declare_parameters(&params, scope);
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.resolve_type(&ty, scope);
+            }
+        }
+        if let Some(ret) = m.return_type() {
+            self.resolve_type(&ret, scope);
+        }
+        if let Some(body) = m.body() {
+            self.resolve_expr(&body, scope);
+        }
+    }
+
+    fn resolve_object_method(&mut self, m: &cst::ObjectMethod, parent_scope: ScopeId) {
+        let scope = self.scopes.alloc(Some(parent_scope));
+        for a in m.annotations() {
+            self.resolve_annotation(&a, scope);
+        }
+        let type_params: Vec<TypeParameter> = m
+            .type_parameters()
+            .map(|tp| tp.parameters().collect())
+            .unwrap_or_default();
+        self.declare_type_parameters(&type_params, scope);
+        let params: Vec<Parameter> = m
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        self.declare_parameters(&params, scope);
+        for p in &params {
+            if let Some(ty) = p.ty() {
+                self.resolve_type(&ty, scope);
+            }
+        }
+        if let Some(ret) = m.return_type() {
+            self.resolve_type(&ret, scope);
+        }
+        if let Some(body) = m.body() {
+            self.resolve_expr(&body, scope);
+        }
+    }
+
+    fn resolve_object_property(&mut self, p: &cst::ObjectProperty, scope: ScopeId) {
+        for a in p.annotations() {
+            self.resolve_annotation(&a, scope);
+        }
+        if let Some(ty) = p.ty() {
+            self.resolve_type(&ty, scope);
+        }
+        match p.value() {
+            Some(PropertyValue::Expr(e)) => self.resolve_expr(&e, scope),
+            Some(PropertyValue::ObjectBody(body)) => self.resolve_object_body(&body, scope),
+            None => {}
+        }
+    }
+
+    fn resolve_annotation(&mut self, a: &cst::Annotation, scope: ScopeId) {
+        if let Some(name) = a.name() {
+            if let Some(head) = name.segments().next() {
+                self.resolve_ident_in_scope(scope, &ident_text(&head), token_span(&head));
+            }
+        }
+        if let Some(body) = a.body() {
+            self.resolve_object_body(&body, scope);
         }
     }
 
     fn declare_type_parameters(&mut self, params: &[TypeParameter], scope: ScopeId) {
         for p in params {
+            let name = name_token_text(p.name());
             self.insert_symbol(
                 scope,
                 SymbolData {
                     kind: SymbolKind::TypeParameter,
-                    name: p.name.name.clone(),
-                    name_span: p.name.span,
-                    full_span: p.span,
+                    name: name.clone(),
+                    name_span: token_span_or_empty(p.name()),
+                    full_span: significant_span(p.syntax()),
                     container: None,
                     signature: None,
                     doc: None,
@@ -450,7 +583,7 @@ impl Resolver {
                     origin: Origin::User,
                     parent_class: None,
                     declared_ty: Ty::Named {
-                        name: p.name.name.clone(),
+                        name,
                         args: Vec::new(),
                     },
                 },
@@ -464,16 +597,20 @@ impl Resolver {
                 scope,
                 SymbolData {
                     kind: SymbolKind::Parameter,
-                    name: p.name.name.clone(),
-                    name_span: p.name.span,
-                    full_span: p.span,
+                    name: name_token_text(p.name()),
+                    name_span: token_span_or_empty(p.name()),
+                    full_span: significant_span(p.syntax()),
                     container: None,
                     signature: Some(format_parameter_signature(p)),
                     doc: None,
                     modifiers: Vec::new(),
                     origin: Origin::User,
                     parent_class: None,
-                    declared_ty: p.ty.as_ref().map(Ty::from_type_ref).unwrap_or(Ty::Unknown),
+                    declared_ty: p
+                        .ty()
+                        .as_ref()
+                        .map(Ty::from_cst_type)
+                        .unwrap_or(Ty::Unknown),
                 },
             );
         }
@@ -482,43 +619,52 @@ impl Resolver {
     // ------------------------------------------------------------------
     // Types
 
-    fn resolve_type(&mut self, ty: &TypeRef, scope: ScopeId) {
+    fn resolve_type(&mut self, ty: &Type, scope: ScopeId) {
         match ty {
-            TypeRef::Named {
-                name, arguments, ..
-            } => {
-                // Resolve the head segment only. Qualified type names like
-                // `acme.Foo` require module-graph resolution to look up the
-                // member of the imported module; we'll add that with
-                // cross-file imports later.
-                if let Some(head) = name.segments.first() {
-                    self.resolve_ident_in_scope(scope, &head.name, head.span);
+            Type::Named(n) => {
+                if let Some(name) = n.name() {
+                    // Resolve the head segment only. Qualified type names
+                    // require module-graph resolution to look up the
+                    // member of the imported module; we'll add that with
+                    // cross-file imports later.
+                    if let Some(head) = name.segments().next() {
+                        self.resolve_ident_in_scope(scope, &ident_text(&head), token_span(&head));
+                    }
                 }
-                for a in arguments {
-                    self.resolve_type(a, scope);
-                }
-            }
-            TypeRef::Nullable { inner, .. } | TypeRef::Parenthesized { inner, .. } => {
-                self.resolve_type(inner, scope)
-            }
-            TypeRef::Union { members, .. } => {
-                for m in members {
-                    self.resolve_type(m, scope);
+                if let Some(args) = n.type_arguments() {
+                    for a in args.arguments() {
+                        self.resolve_type(&a, scope);
+                    }
                 }
             }
-            TypeRef::Function {
-                parameters, result, ..
-            } => {
-                for p in parameters {
-                    self.resolve_type(p, scope);
+            Type::Nullable(n) => {
+                if let Some(inner) = n.inner() {
+                    self.resolve_type(&inner, scope);
                 }
-                self.resolve_type(result, scope);
             }
-            TypeRef::StringLiteral(_)
-            | TypeRef::Unknown(_)
-            | TypeRef::Nothing(_)
-            | TypeRef::Module(_)
-            | TypeRef::Error { .. } => {}
+            Type::Parenthesized(p) => {
+                if let Some(inner) = p.inner() {
+                    self.resolve_type(&inner, scope);
+                }
+            }
+            Type::Union(u) => {
+                for m in u.members() {
+                    self.resolve_type(&m, scope);
+                }
+            }
+            Type::Function(f) => {
+                for p in f.parameters() {
+                    self.resolve_type(&p, scope);
+                }
+                if let Some(result) = f.result() {
+                    self.resolve_type(&result, scope);
+                }
+            }
+            Type::StringLiteral(_)
+            | Type::Unknown(_)
+            | Type::Nothing(_)
+            | Type::Module(_)
+            | Type::Error(_) => {}
         }
     }
 
@@ -527,192 +673,269 @@ impl Resolver {
 
     fn resolve_expr(&mut self, expr: &Expr, scope: ScopeId) {
         match expr {
-            Expr::Literal(_) | Expr::SpecialIdent { .. } => {}
-            Expr::Ident(id) => self.resolve_ident_in_scope(scope, &id.name, id.span),
-            Expr::Paren { inner, .. } | Expr::NonNull { operand: inner, .. } => {
-                self.resolve_expr(inner, scope)
+            Expr::Literal(_) => {}
+            Expr::Ident(id) => {
+                if let Some(tok) = id.token() {
+                    // Skip special identifiers (this/super/outer/module)
+                    if id.special().is_some() {
+                        return;
+                    }
+                    self.resolve_ident_in_scope(scope, &ident_text(&tok), token_span(&tok));
+                }
             }
-            Expr::Unary { operand, .. } => self.resolve_expr(operand, scope),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.resolve_expr(lhs, scope);
-                self.resolve_expr(rhs, scope);
+            Expr::Paren(p) => {
+                if let Some(inner) = p.inner() {
+                    self.resolve_expr(&inner, scope);
+                }
             }
-            Expr::TypeCheck { operand, ty, .. } | Expr::TypeCast { operand, ty, .. } => {
-                self.resolve_expr(operand, scope);
-                self.resolve_type(ty, scope);
+            Expr::NonNull(n) => {
+                if let Some(operand) = n.operand() {
+                    self.resolve_expr(&operand, scope);
+                }
             }
-            Expr::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.resolve_expr(cond, scope);
-                self.resolve_expr(then_branch, scope);
-                self.resolve_expr(else_branch, scope);
+            Expr::Unary(u) => {
+                if let Some(operand) = u.operand() {
+                    self.resolve_expr(&operand, scope);
+                }
             }
-            Expr::Let {
-                binding,
-                value,
-                body,
-                ..
-            } => {
+            Expr::Binary(b) => {
+                if let Some(lhs) = b.lhs() {
+                    self.resolve_expr(&lhs, scope);
+                }
+                if let Some(rhs) = b.rhs() {
+                    self.resolve_expr(&rhs, scope);
+                }
+            }
+            Expr::NullCoalesce(n) => {
+                if let Some(lhs) = n.lhs() {
+                    self.resolve_expr(&lhs, scope);
+                }
+                if let Some(rhs) = n.rhs() {
+                    self.resolve_expr(&rhs, scope);
+                }
+            }
+            Expr::TypeCheck(t) => {
+                if let Some(operand) = t.operand() {
+                    self.resolve_expr(&operand, scope);
+                }
+                if let Some(ty) = t.ty() {
+                    self.resolve_type(&ty, scope);
+                }
+            }
+            Expr::TypeCast(t) => {
+                if let Some(operand) = t.operand() {
+                    self.resolve_expr(&operand, scope);
+                }
+                if let Some(ty) = t.ty() {
+                    self.resolve_type(&ty, scope);
+                }
+            }
+            Expr::If(i) => {
+                if let Some(c) = i.condition() {
+                    self.resolve_expr(&c, scope);
+                }
+                if let Some(t) = i.then_branch() {
+                    self.resolve_expr(&t, scope);
+                }
+                if let Some(e) = i.else_branch() {
+                    self.resolve_expr(&e, scope);
+                }
+            }
+            Expr::Let(l) => {
                 // The binding's value is evaluated in the outer scope, but
                 // the body sees the new binding.
-                self.resolve_expr(value, scope);
-                let inner = self.scopes.alloc(Some(scope));
-                if let Some(ty) = &binding.ty {
-                    self.resolve_type(ty, scope);
+                if let Some(value) = l.value() {
+                    self.resolve_expr(&value, scope);
                 }
-                self.insert_symbol(
-                    inner,
-                    SymbolData {
-                        kind: SymbolKind::LetBinding,
-                        name: binding.name.name.clone(),
-                        name_span: binding.name.span,
-                        full_span: binding.span,
-                        container: None,
-                        signature: Some(format_parameter_signature(binding)),
-                        doc: None,
-                        modifiers: Vec::new(),
-                        origin: Origin::User,
-                        parent_class: None,
-                        declared_ty: binding
-                            .ty
-                            .as_ref()
-                            .map(Ty::from_type_ref)
-                            .unwrap_or(Ty::Unknown),
-                    },
-                );
-                self.resolve_expr(body, inner);
-            }
-            Expr::Lambda {
-                parameters, body, ..
-            } => {
                 let inner = self.scopes.alloc(Some(scope));
-                self.declare_parameters(parameters, inner);
-                for p in parameters {
-                    if let Some(ty) = &p.ty {
-                        self.resolve_type(ty, scope);
+                if let Some(binding) = l.binding() {
+                    if let Some(ty) = binding.ty() {
+                        self.resolve_type(&ty, scope);
+                    }
+                    self.insert_symbol(
+                        inner,
+                        SymbolData {
+                            kind: SymbolKind::LetBinding,
+                            name: name_token_text(binding.name()),
+                            name_span: token_span_or_empty(binding.name()),
+                            full_span: significant_span(binding.syntax()),
+                            container: None,
+                            signature: Some(format_parameter_signature(&binding)),
+                            doc: None,
+                            modifiers: Vec::new(),
+                            origin: Origin::User,
+                            parent_class: None,
+                            declared_ty: binding
+                                .ty()
+                                .as_ref()
+                                .map(Ty::from_cst_type)
+                                .unwrap_or(Ty::Unknown),
+                        },
+                    );
+                }
+                if let Some(body) = l.body() {
+                    self.resolve_expr(&body, inner);
+                }
+            }
+            Expr::Lambda(lam) => {
+                let inner = self.scopes.alloc(Some(scope));
+                let params: Vec<Parameter> = lam
+                    .parameters()
+                    .map(|pl| pl.parameters().collect())
+                    .unwrap_or_default();
+                self.declare_parameters(&params, inner);
+                for p in &params {
+                    if let Some(ty) = p.ty() {
+                        self.resolve_type(&ty, scope);
                     }
                 }
-                self.resolve_expr(body, inner);
-            }
-            Expr::Call {
-                callee,
-                type_args,
-                args,
-                ..
-            } => {
-                self.resolve_expr(callee, scope);
-                for a in type_args {
-                    self.resolve_type(a, scope);
-                }
-                for a in args {
-                    self.resolve_expr(a, scope);
+                if let Some(body) = lam.body() {
+                    self.resolve_expr(&body, inner);
                 }
             }
-            Expr::Index {
-                receiver, index, ..
-            } => {
-                self.resolve_expr(receiver, scope);
-                self.resolve_expr(index, scope);
+            Expr::Call(c) => {
+                if let Some(callee) = c.callee() {
+                    self.resolve_expr(&callee, scope);
+                }
+                for a in c.args() {
+                    self.resolve_expr(&a, scope);
+                }
             }
-            Expr::Member { receiver, .. } => {
+            Expr::Index(i) => {
+                if let Some(receiver) = i.receiver() {
+                    self.resolve_expr(&receiver, scope);
+                }
+                if let Some(idx) = i.index() {
+                    self.resolve_expr(&idx, scope);
+                }
+            }
+            Expr::Member(m) => {
                 // We resolve the receiver but leave `.name` for the type
                 // checker — its meaning depends on the receiver's type.
-                self.resolve_expr(receiver, scope);
-            }
-            Expr::New { ty, body, .. } => {
-                if let Some(ty) = ty {
-                    self.resolve_type(ty, scope);
+                if let Some(receiver) = m.receiver() {
+                    self.resolve_expr(&receiver, scope);
                 }
-                self.resolve_object_body(body, scope);
             }
-            Expr::AmendsObject { base, body, .. } => {
-                self.resolve_expr(base, scope);
-                self.resolve_object_body(body, scope);
+            Expr::New(n) => {
+                if let Some(ty) = n.ty() {
+                    self.resolve_type(&ty, scope);
+                }
+                if let Some(body) = n.body() {
+                    self.resolve_object_body(&body, scope);
+                }
             }
-            Expr::Throw { argument, .. }
-            | Expr::Trace { argument, .. }
-            | Expr::Read { argument, .. } => self.resolve_expr(argument, scope),
-            Expr::Error { .. } => {}
+            Expr::Amends(a) => {
+                if let Some(base) = a.base() {
+                    self.resolve_expr(&base, scope);
+                }
+                if let Some(body) = a.body() {
+                    self.resolve_object_body(&body, scope);
+                }
+            }
+            Expr::Throw(t) => {
+                if let Some(arg) = t.argument() {
+                    self.resolve_expr(&arg, scope);
+                }
+            }
+            Expr::Trace(t) => {
+                if let Some(arg) = t.argument() {
+                    self.resolve_expr(&arg, scope);
+                }
+            }
+            Expr::Read(r) => {
+                if let Some(arg) = r.argument() {
+                    self.resolve_expr(&arg, scope);
+                }
+            }
+            Expr::Error(_) => {}
         }
     }
 
     fn resolve_object_body(&mut self, body: &ObjectBody, parent_scope: ScopeId) {
-        let scope = if body.parameters.is_empty() {
+        let params: Vec<Parameter> = body
+            .parameters()
+            .map(|pl| pl.parameters().collect())
+            .unwrap_or_default();
+        let scope = if params.is_empty() {
             parent_scope
         } else {
             let inner = self.scopes.alloc(Some(parent_scope));
-            for p in &body.parameters {
+            for p in &params {
                 self.insert_symbol(
                     inner,
                     SymbolData {
                         kind: SymbolKind::ObjectParameter,
-                        name: p.name.name.clone(),
-                        name_span: p.name.span,
-                        full_span: p.span,
+                        name: name_token_text(p.name()),
+                        name_span: token_span_or_empty(p.name()),
+                        full_span: significant_span(p.syntax()),
                         container: None,
                         signature: Some(format_parameter_signature(p)),
                         doc: None,
                         modifiers: Vec::new(),
                         origin: Origin::User,
                         parent_class: None,
-                        declared_ty: p.ty.as_ref().map(Ty::from_type_ref).unwrap_or(Ty::Unknown),
+                        declared_ty: p
+                            .ty()
+                            .as_ref()
+                            .map(Ty::from_cst_type)
+                            .unwrap_or(Ty::Unknown),
                     },
                 );
-                if let Some(ty) = &p.ty {
-                    self.resolve_type(ty, parent_scope);
+                if let Some(ty) = p.ty() {
+                    self.resolve_type(&ty, parent_scope);
                 }
             }
             inner
         };
-        for member in &body.members {
-            self.resolve_object_member(member, scope);
+        for member in body.members() {
+            self.resolve_object_member(&member, scope);
         }
     }
 
     fn resolve_object_member(&mut self, member: &ObjectMember, scope: ScopeId) {
         match member {
-            ObjectMember::Property(p) => self.resolve_property(p, scope, None),
-            ObjectMember::Method(m) => self.resolve_method(m, scope, None),
-            ObjectMember::Element(e) => self.resolve_expr(e, scope),
-            ObjectMember::Entry { key, value, .. } => {
-                self.resolve_expr(key, scope);
-                match value {
-                    PropertyValue::Expr(e) => self.resolve_expr(e, scope),
-                    PropertyValue::ObjectBody(body) => self.resolve_object_body(body, scope),
+            ObjectMember::Property(p) => self.resolve_object_property(p, scope),
+            ObjectMember::Method(m) => self.resolve_object_method(m, scope),
+            ObjectMember::Element(e) => {
+                if let Some(expr) = e.expr() {
+                    self.resolve_expr(&expr, scope);
                 }
             }
-            ObjectMember::When {
-                cond,
-                then_body,
-                else_body,
-                ..
-            } => {
-                self.resolve_expr(cond, scope);
-                self.resolve_object_body(then_body, scope);
-                if let Some(b) = else_body {
-                    self.resolve_object_body(b, scope);
+            ObjectMember::Entry(e) => {
+                if let Some(key) = e.key() {
+                    self.resolve_expr(&key, scope);
+                }
+                match e.value() {
+                    Some(PropertyValue::Expr(expr)) => self.resolve_expr(&expr, scope),
+                    Some(PropertyValue::ObjectBody(body)) => self.resolve_object_body(&body, scope),
+                    None => {}
                 }
             }
-            ObjectMember::For {
-                bindings,
-                iterable,
-                body,
-                ..
-            } => {
-                self.resolve_expr(iterable, scope);
+            ObjectMember::When(w) => {
+                if let Some(c) = w.condition() {
+                    self.resolve_expr(&c, scope);
+                }
+                if let Some(then_body) = w.then_body() {
+                    self.resolve_object_body(&then_body, scope);
+                }
+                if let Some(else_body) = w.else_body() {
+                    self.resolve_object_body(&else_body, scope);
+                }
+            }
+            ObjectMember::For(f) => {
+                if let Some(iter) = f.iterable() {
+                    self.resolve_expr(&iter, scope);
+                }
                 let inner = self.scopes.alloc(Some(scope));
-                for b in bindings {
+                let bindings: Vec<Parameter> = f.bindings().collect();
+                for b in &bindings {
                     self.insert_symbol(
                         inner,
                         SymbolData {
                             kind: SymbolKind::ForBinding,
-                            name: b.name.name.clone(),
-                            name_span: b.name.span,
-                            full_span: b.span,
+                            name: name_token_text(b.name()),
+                            name_span: token_span_or_empty(b.name()),
+                            full_span: significant_span(b.syntax()),
                             container: None,
                             signature: Some(format_parameter_signature(b)),
                             doc: None,
@@ -720,19 +943,25 @@ impl Resolver {
                             origin: Origin::User,
                             parent_class: None,
                             declared_ty: b
-                                .ty
+                                .ty()
                                 .as_ref()
-                                .map(Ty::from_type_ref)
+                                .map(Ty::from_cst_type)
                                 .unwrap_or(Ty::Unknown),
                         },
                     );
-                    if let Some(ty) = &b.ty {
-                        self.resolve_type(ty, scope);
+                    if let Some(ty) = b.ty() {
+                        self.resolve_type(&ty, scope);
                     }
                 }
-                self.resolve_object_body(body, inner);
+                if let Some(body) = f.body() {
+                    self.resolve_object_body(&body, inner);
+                }
             }
-            ObjectMember::Spread { expr, .. } => self.resolve_expr(expr, scope),
+            ObjectMember::Spread(s) => {
+                if let Some(expr) = s.expr() {
+                    self.resolve_expr(&expr, scope);
+                }
+            }
         }
     }
 }
@@ -740,19 +969,56 @@ impl Resolver {
 // ----------------------------------------------------------------------
 // Helpers
 
-fn modifier_kinds(mods: &[Modifier]) -> Vec<ModifierKind> {
-    mods.iter().map(|m| m.kind).collect()
+fn name_token_text(t: Option<SyntaxToken>) -> String {
+    t.map(|t| ident_text(&t)).unwrap_or_default()
+}
+
+fn token_span_or_empty(t: Option<SyntaxToken>) -> Span {
+    t.map(|t| token_span(&t)).unwrap_or(Span::EMPTY)
+}
+
+/// Collect modifier kinds off any node with `modifiers()`.
+trait HasModifiers {
+    fn modifier_kinds(&self) -> Vec<cst::ModifierKind>;
+}
+
+macro_rules! impl_has_modifiers {
+    ($($t:ty),*) => {
+        $(
+            impl HasModifiers for $t {
+                fn modifier_kinds(&self) -> Vec<cst::ModifierKind> {
+                    self.modifiers().filter_map(|m| m.kind()).collect()
+                }
+            }
+        )*
+    };
+}
+
+impl_has_modifiers!(
+    cst::ClassDecl,
+    cst::TypeAliasDecl,
+    cst::PropertyDecl,
+    cst::ClassPropertyDecl,
+    cst::ObjectProperty,
+    cst::MethodDecl,
+    cst::ClassMethodDecl,
+    cst::ObjectMethod
+);
+
+fn modifier_kinds<T: HasModifiers>(node: &T) -> Vec<cst::ModifierKind> {
+    node.modifier_kinds()
 }
 
 /// Extract the bare parent-class name from an `extends T` clause, stripping
 /// generics and qualifiers. `extends acme.Foo<Bar>` becomes `Some("Foo")`.
 /// Returns `None` for anything we can't reduce to a simple class name.
-fn extends_class_name(extends: Option<&TypeRef>) -> Option<String> {
+fn extends_class_name(extends: Option<&Type>) -> Option<String> {
     let ty = extends?;
-    let TypeRef::Named { name, .. } = ty else {
+    let Type::Named(n) = ty else {
         return None;
     };
-    name.segments.last().map(|seg| seg.name.clone())
+    let name = n.name()?;
+    name.segments().last().map(|seg| ident_text(&seg))
 }
 
 fn stdlib_type_data(t: &'static StdlibType) -> SymbolData {

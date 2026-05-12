@@ -4,6 +4,7 @@
 use pkl_analyze::hover::hover_markdown;
 use pkl_analyze::resolve_module;
 use pkl_analyze::symbols::Origin;
+use pkl_syntax::cst::{AstNode, Module};
 use pkl_syntax::parse;
 
 fn resolve(src: &str) -> pkl_analyze::Resolution {
@@ -13,7 +14,8 @@ fn resolve(src: &str) -> pkl_analyze::Resolution {
         "syntax diagnostics: {:#?}",
         parsed.diagnostics
     );
-    resolve_module(&parsed.module)
+    let module = Module::cast(parsed.syntax()).expect("module");
+    resolve_module(&module)
 }
 
 #[test]

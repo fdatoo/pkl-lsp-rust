@@ -5,6 +5,7 @@
 //! `TextEdit`. If the parse has errors we skip formatting to avoid
 //! erasing user code.
 
+use pkl_syntax::cst::{AstNode, Module};
 use pkl_syntax::format::format_module;
 use tower_lsp::lsp_types::{Position, Range, TextEdit};
 
@@ -14,7 +15,8 @@ pub fn format_document(doc: &Document) -> Option<Vec<TextEdit>> {
     if !doc.parsed.diagnostics.is_empty() {
         return None;
     }
-    let formatted = format_module(&doc.parsed.module);
+    let module = Module::cast(doc.parsed.syntax())?;
+    let formatted = format_module(&module);
     let current = doc.rope.to_string();
     if formatted == current {
         return Some(Vec::new());
