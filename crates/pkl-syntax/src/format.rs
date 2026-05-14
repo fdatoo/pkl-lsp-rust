@@ -61,9 +61,7 @@ pub fn format_module(module: &Module) -> String {
                 }
                 out.push('\n');
             }
-        } else if !out.is_empty() && !first_item {
-            ensure_blank_line(&mut out);
-        } else if !out.is_empty() && !out.ends_with("\n\n") {
+        } else if !out.is_empty() && (!first_item || !out.ends_with("\n\n")) {
             ensure_blank_line(&mut out);
         }
         if let Some(end) = property_group_end(&items, i) {
@@ -267,8 +265,7 @@ fn property_group_end(items: &[cst::Item], start: usize) -> Option<usize> {
         let cst::Item::Property(p) = &items[end] else {
             break;
         };
-        if !is_alignable_top_level_property(p) || !collect_leading_comments(p.syntax()).is_empty()
-        {
+        if !is_alignable_top_level_property(p) || !collect_leading_comments(p.syntax()).is_empty() {
             break;
         }
         end += 1;

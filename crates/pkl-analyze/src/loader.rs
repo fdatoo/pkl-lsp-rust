@@ -628,9 +628,7 @@ mod tests {
             ..FsLoaderConfig::default()
         });
 
-        let p = loader
-            .resolve_path("switchyard:automations", None)
-            .unwrap();
+        let p = loader.resolve_path("switchyard:automations", None).unwrap();
         assert_eq!(p, module_path);
     }
 
@@ -650,9 +648,7 @@ mod tests {
             ..FsLoaderConfig::default()
         });
 
-        let p = loader
-            .resolve_path("switchyard:automations", None)
-            .unwrap();
+        let p = loader.resolve_path("switchyard:automations", None).unwrap();
         assert_eq!(p, module_path);
     }
 

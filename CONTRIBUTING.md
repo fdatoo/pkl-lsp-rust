@@ -17,6 +17,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Run every test (unit + integration + doc)
 cargo test --workspace
 
+# Optional: run the real-world LSP smoke sweep against local corpora
+cargo build --release -p pkl-lsp
+python3 scripts/realworld_smoke.py --binary target/release/pkl-lsp /path/to/pkl-repo
+
 # Benchmarks (release-mode; bring your own samples size)
 cargo bench -p pkl-syntax
 cargo bench -p pkl-analyze
@@ -86,11 +90,6 @@ https://github.com/apple/pkl`, `git sparse-checkout set stdlib`, copy
 `stdlib/*.pkl` and `LICENSE.txt`, update the commit hash in
 `UPSTREAM.md`.
 
-## TODO / roadmap
-
-The deferred work and known gaps are tracked in [`TODO.md`](TODO.md).
-Strike items as they ship and add new ones when you discover gaps.
-
 ## Commit messages
 
 * Imperative present tense ("Add foo", not "Added foo"). 70-char
@@ -101,6 +100,11 @@ Strike items as they ship and add new ones when you discover gaps.
 
 ## Releases
 
-There's no release process yet — `pkl-lsp` is consumed from source.
-When that changes the `.github/workflows/` directory will gain a
-release workflow that tags + publishes signed binaries.
+Release mechanics live in [docs/RELEASE.md](docs/RELEASE.md). In short:
+run the local release checks, update the workspace version and release notes,
+tag `vX.Y.Z`, and let `.github/workflows/release.yml` build and publish the
+binary artifacts.
+
+Do not publish the library crates by default. The public v1 artifact is the
+`pkl-lsp` binary; the internal crates are still free to evolve while the LSP
+surface stabilizes.

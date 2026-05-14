@@ -1334,9 +1334,7 @@ impl<'src> Parser<'src> {
                         SyntaxKind::LParen => paren_depth += 1,
                         SyntaxKind::RParen if paren_depth > 0 => paren_depth -= 1,
                         SyntaxKind::Lt if paren_depth == 0 => angle_depth += 1,
-                        SyntaxKind::Gt if paren_depth == 0 && angle_depth > 0 => {
-                            angle_depth -= 1
-                        }
+                        SyntaxKind::Gt if paren_depth == 0 && angle_depth > 0 => angle_depth -= 1,
                         SyntaxKind::Comma | SyntaxKind::Arrow
                             if paren_depth == 0 && angle_depth == 0 =>
                         {

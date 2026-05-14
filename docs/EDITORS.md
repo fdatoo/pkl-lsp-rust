@@ -149,6 +149,9 @@ Set `eglot-workspace-configuration` if your client passes
 * `PKL_LSP_LOG=debug` enables verbose tracing on stderr.
 * `PKL_LSP_NAMESPACES="name=/path,name2=/path"` is read as a fallback
   when the client doesn't deliver `initializationOptions.namespaces`.
+* Namespace roots may point either at the module directory itself or at a
+  Pkl project root containing `PklProject.pkl`. For project roots,
+  `name:foo` also tries `$ROOT/name/foo.pkl`.
 * Each LSP method runs synchronously against the per-document analysis;
   if a request hangs the most likely culprit is the document not yet
   having reached the server (no `didOpen`).

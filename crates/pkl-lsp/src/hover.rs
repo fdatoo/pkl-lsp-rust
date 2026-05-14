@@ -68,9 +68,7 @@ pub fn hover_at(
         .iter()
         .find(|r| r.symbol == symbol_id && r.span.touches(offset))
         .map(|r| doc.span_to_range(r.span))
-        .or_else(|| {
-            (!symbol.origin.is_stdlib()).then(|| doc.span_to_range(symbol.name_span))
-        });
+        .or_else(|| (!symbol.origin.is_stdlib()).then(|| doc.span_to_range(symbol.name_span)));
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {

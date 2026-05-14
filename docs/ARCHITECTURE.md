@@ -8,8 +8,8 @@ depends only on the crates to its left in this diagram:
 ┌──────────────┐      ┌──────────────┐
 │ pkl-syntax   │◄─────│ pkl-stdlib   │
 │ (lexer +     │      │ (vendored    │
-│  parsers +   │      │  pkl.base    │
-│  AST + CST + │      │  + bundled   │
+│  parser +    │      │  pkl.base    │
+│  CST +       │      │  + bundled   │
 │  formatter)  │      │  modules)    │
 └──────┬───────┘      └──────┬───────┘
        │                     │
@@ -33,10 +33,10 @@ depends only on the crates to its left in this diagram:
 
 ### `pkl-syntax`
 
-Pure lexer + parser + AST + formatter. No analysis state, no I/O.
+Pure lexer + parser + CST + formatter. No analysis state, no I/O.
 
-The lossless rowan tree is the single source of truth; the typed AST
-is materialized off it on every parse.
+The lossless rowan tree is the single source of truth. Typed CST
+wrappers are built over it on demand.
 
 * `lexer.rs` is a hand-rolled byte-streaming lexer with `unicode-ident`
   for XID classification. It produces a flat `Vec<Token>` and preserves
@@ -170,7 +170,7 @@ queries the LSP shortcuts through the document's cached analysis.
 
 ## Key data structures
 
-* `Span { start: u32, end: u32 }` — byte offsets. Every AST node and
+* `Span { start: u32, end: u32 }` — byte offsets. Every syntax wrapper and
   symbol carries one. Conversion to LSP `Position` (UTF-16) happens
   only in the LSP layer using the document's `ropey::Rope`.
 * `Ty` — internal type enum: primitives, `Nullable`, `Union`,
