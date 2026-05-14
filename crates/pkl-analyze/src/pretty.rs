@@ -27,6 +27,18 @@ fn write_type(out: &mut String, ty: &Type) {
                 out.push_str(tok.text());
             }
         }
+        Type::Constrained(c) => {
+            if let Some(inner) = c.inner() {
+                write_type(out, &inner);
+            }
+            out.push_str("(...)");
+        }
+        Type::Default(d) => {
+            out.push('*');
+            if let Some(inner) = d.inner() {
+                write_type(out, &inner);
+            }
+        }
         Type::Unknown(_) => out.push_str("unknown"),
         Type::Nothing(_) => out.push_str("nothing"),
         Type::Module(_) => out.push_str("module"),

@@ -2,7 +2,7 @@
 //! coverage — they pin the shapes the LSP foundation relies on.
 
 use pkl_syntax::cst::{
-    AstNode, BinaryOp, ClauseKind, Expr, Item, LiteralKind, Module, PropertyValue,
+    AstNode, BinaryOp, ClauseKind, Expr, Item, LiteralKind, Module, PropertyValue, Type,
 };
 use pkl_syntax::parser::parse;
 use pkl_syntax::SyntaxKind;
@@ -229,6 +229,137 @@ fn parses_nullable_and_union_types() {
     let src = "x: String?\ny: String | Int | Null";
     let (_, diags) = parse_module(src);
     assert!(diags.is_empty(), "diagnostics: {:#?}", diags);
+}
+
+#[test]
+fn parses_constrained_and_default_types() {
+    let src = r#"
+class Fibonacci {
+  function fib(n: Int(this >= 0)): Int(this >= 0) = n
+}
+local typealias PklJobs = Mapping<String, *Workflow.Job>
+"#;
+    let (m, diags) = parse_module(src);
+    assert!(diags.is_empty(), "diagnostics: {:#?}", diags);
+
+    let class = match m.items().next().unwrap() {
+        Item::Class(c) => c,
+        _ => panic!("expected class"),
+    };
+    let method = class
+        .body()
+        .unwrap()
+        .members()
+        .find_map(|m| match m {
+            pkl_syntax::cst::ClassMember::Method(m) => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    let param = method.parameters().unwrap().parameters().next().unwrap();
+    assert!(matches!(param.ty(), Some(Type::Constrained(_))));
+
+    let alias = match m.items().nth(1).unwrap() {
+        Item::TypeAlias(t) => t,
+        _ => panic!("expected typealias"),
+    };
+    let text = alias.syntax().text().to_string();
+    assert!(text.contains("*Workflow.Job"));
+}
+
+#[test]
+fn parses_import_glob_expression() {
+    let src = r#"fruit = import*("@fruities/catalog/*.pkl")"#;
+    let (m, diags) = parse_module(src);
+    assert!(diags.is_empty(), "diagnostics: {:#?}", diags);
+    let prop = match m.items().next().unwrap() {
+        Item::Property(p) => p,
+        _ => panic!("expected property"),
+    };
+    let Some(PropertyValue::Expr(Expr::Import(import))) = prop.value() else {
+        panic!("expected import expression");
+    };
+    assert!(import.argument().is_some());
+}
+
+#[test]
+fn parses_computed_object_entries() {
+    assert_clean(
+        r#"
+jobs = new {
+  ["gradle-check"] = gradleCheck
+  ["java-executables"] = (buildJavaExecutableJob) { isRelease = false }
+  [[true]] { nightlyMacOS = false }
+}
+"#,
+    );
+}
+
+#[test]
+fn parses_object_amends_chains_and_truncating_division() {
+    assert_clean(
+        r#"
+foo {
+  bar { "Hello" }
+} {
+  bar { "World" }
+}
+
+examples {
+  ["truncating division"] {
+    5.kb ~/ 3
+  }
+}
+"#,
+    );
+}
+
+#[test]
+fn parses_object_amend_lambda_parameters() {
+    assert_clean(
+        r#"
+example {
+  local f = (x, y, z) -> new Dynamic { prop3 = z }
+  result1 = (f) { a, b: Number(this > 3) -> prop = a + b }.apply(1, 2)
+  result = (f) { a: Foo, b: Bar, c: Baz -> prop1 = a; prop2 = b }.apply(new Foo {}, new Bar {}, new Baz {})
+}
+"#,
+    );
+}
+
+#[test]
+fn parses_trailing_commas_in_lambda_and_function_types() {
+    assert_clean(
+        r#"
+local lA = (a, b, c,) -> true
+local lB = (
+  a: Int,
+  b: Int,
+) -> true
+local lC: (Dynamic,) -> Dynamic = new Mixin { a, -> x = true }
+local lD: (Dynamic,) -> Dynamic = new Mixin { a: Dynamic, -> x = true }
+"#,
+    );
+}
+
+#[test]
+fn parses_union_types_in_casts_and_nested_indexes() {
+    assert_clean(
+        r#"
+examples {
+  ["union type"] {
+    42 as Int|String
+    List(1, 2, 3,) as List<String>|List<Int>
+  }
+}
+result = mapping2[mapping1["x"]]
+res12 {1.2;.3;.4;.5}
+"#,
+    );
+}
+
+#[test]
+fn parses_class_body_semicolon_separators() {
+    assert_clean(r#"local class Person { name: String = "Default"; age: Int }"#);
 }
 
 #[test]

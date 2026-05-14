@@ -125,6 +125,7 @@ impl<'src> Lexer<'src> {
             }
             b'`' => self.lex_quoted_ident(),
             b'0'..=b'9' => self.lex_number(),
+            b'.' if matches!(self.peek_byte(1), Some(b'0'..=b'9')) => self.lex_number(),
             // identifiers — ASCII fast path; for non-ASCII we fall through to
             // the full Unicode branch below.
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => self.lex_ident_or_keyword(),
@@ -780,7 +781,6 @@ impl<'src> Lexer<'src> {
         let (kind, consume) = match (b, b1, b2) {
             (b'.', Some(b'.'), Some(b'.')) => (SyntaxKind::Ellipsis, 3),
             (b'[', Some(b'['), _) => (SyntaxKind::LDoubleBracket, 2),
-            (b']', Some(b']'), _) => (SyntaxKind::RDoubleBracket, 2),
             (b'.', Some(b'.'), _) => (SyntaxKind::DotDot, 2),
             (b':', Some(b':'), _) => (SyntaxKind::ColonColon, 2),
             (b'-', Some(b'>'), _) => (SyntaxKind::Arrow, 2),
@@ -793,6 +793,7 @@ impl<'src> Lexer<'src> {
             (b'?', Some(b'?'), _) => (SyntaxKind::QuestionQuestion, 2),
             (b'|', Some(b'>'), _) => (SyntaxKind::PipeGt, 2),
             (b'*', Some(b'*'), _) => (SyntaxKind::StarStar, 2),
+            (b'~', Some(b'/'), _) => (SyntaxKind::TildeSlash, 2),
             (b'{', _, _) => (SyntaxKind::LBrace, 1),
             (b'}', _, _) => (SyntaxKind::RBrace, 1),
             (b'(', _, _) => (SyntaxKind::LParen, 1),

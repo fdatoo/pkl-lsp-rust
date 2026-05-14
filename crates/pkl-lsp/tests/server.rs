@@ -124,6 +124,50 @@ async fn initialize_did_open_document_symbol() {
 }
 
 #[tokio::test]
+async fn did_open_publishes_analyzer_diagnostics() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+
+    let (service, socket) = LspService::new(Backend::new);
+    let server = Server::new(server_in, server_out, socket).serve(service);
+    let server_handle = tokio::spawn(server);
+
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {
+                "uri": "file:///tmp/type-mismatch.pkl",
+                "languageId": "pkl",
+                "version": 1,
+                "text": "bad: Int = \"oops\"\n"
+            }}
+        }),
+    )
+    .await;
+
+    let diags = read_message(&mut client_from_server).await;
+    let arr = diags["params"]["diagnostics"].as_array().unwrap();
+    assert_eq!(arr.len(), 1, "diagnostics: {:?}", arr);
+    assert!(
+        arr[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("type mismatch"),
+        "diagnostics: {:?}",
+        arr
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
 async fn hover_and_goto_definition() {
     let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
     let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
@@ -199,6 +243,8 @@ async fn hover_and_goto_definition() {
     assert_eq!(contents["kind"], "markdown");
     let value = contents["value"].as_str().unwrap();
     assert!(value.contains("name: String"), "got: {}", value);
+    assert_eq!(hover["result"]["range"]["start"]["character"], 39);
+    assert_eq!(hover["result"]["range"]["end"]["character"], 43);
 
     // ---- goto-def from the same position -------------------------------
     send(

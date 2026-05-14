@@ -772,6 +772,8 @@ pub enum Type {
     Function(FunctionType),
     Parenthesized(ParenthesizedType),
     StringLiteral(StringLiteralType),
+    Constrained(ConstrainedType),
+    Default(DefaultType),
     Module(ModuleType),
     Unknown(UnknownType),
     Nothing(NothingType),
@@ -788,6 +790,8 @@ impl AstNode for Type {
                 | SyntaxKind::TypeFunction
                 | SyntaxKind::TypeParenthesized
                 | SyntaxKind::TypeStringLiteral
+                | SyntaxKind::TypeConstrained
+                | SyntaxKind::TypeDefault
                 | SyntaxKind::TypeModule
                 | SyntaxKind::TypeUnknown
                 | SyntaxKind::TypeNothing
@@ -802,6 +806,8 @@ impl AstNode for Type {
             SyntaxKind::TypeFunction => Type::Function(FunctionType(syntax)),
             SyntaxKind::TypeParenthesized => Type::Parenthesized(ParenthesizedType(syntax)),
             SyntaxKind::TypeStringLiteral => Type::StringLiteral(StringLiteralType(syntax)),
+            SyntaxKind::TypeConstrained => Type::Constrained(ConstrainedType(syntax)),
+            SyntaxKind::TypeDefault => Type::Default(DefaultType(syntax)),
             SyntaxKind::TypeModule => Type::Module(ModuleType(syntax)),
             SyntaxKind::TypeUnknown => Type::Unknown(UnknownType(syntax)),
             SyntaxKind::TypeNothing => Type::Nothing(NothingType(syntax)),
@@ -817,6 +823,8 @@ impl AstNode for Type {
             Type::Function(t) => t.syntax(),
             Type::Parenthesized(t) => t.syntax(),
             Type::StringLiteral(t) => t.syntax(),
+            Type::Constrained(t) => t.syntax(),
+            Type::Default(t) => t.syntax(),
             Type::Module(t) => t.syntax(),
             Type::Unknown(t) => t.syntax(),
             Type::Nothing(t) => t.syntax(),
@@ -883,6 +891,30 @@ impl StringLiteralType {
     }
 }
 
+ast_node!(ConstrainedType, SyntaxKind::TypeConstrained);
+
+impl ConstrainedType {
+    pub fn inner(&self) -> Option<Type> {
+        child_node(&self.0)
+    }
+
+    pub fn constraints(&self) -> Vec<Expr> {
+        self.0
+            .children()
+            .find_map(ArgList::cast)
+            .map(|args| args.args().collect())
+            .unwrap_or_default()
+    }
+}
+
+ast_node!(DefaultType, SyntaxKind::TypeDefault);
+
+impl DefaultType {
+    pub fn inner(&self) -> Option<Type> {
+        child_node(&self.0)
+    }
+}
+
 ast_node!(ModuleType, SyntaxKind::TypeModule);
 ast_node!(UnknownType, SyntaxKind::TypeUnknown);
 ast_node!(NothingType, SyntaxKind::TypeNothing);
@@ -921,6 +953,7 @@ pub enum Expr {
     Throw(ThrowExpr),
     Trace(TraceExpr),
     Read(ReadExpr),
+    Import(ImportExpr),
     Error(ErrorNode),
 }
 
@@ -950,6 +983,7 @@ impl AstNode for Expr {
                 | SyntaxKind::ThrowExpr
                 | SyntaxKind::TraceExpr
                 | SyntaxKind::ReadExpr
+                | SyntaxKind::ImportExpr
                 | SyntaxKind::ErrorNode
         )
     }
@@ -978,6 +1012,7 @@ impl AstNode for Expr {
             SyntaxKind::ThrowExpr => Expr::Throw(ThrowExpr(syntax)),
             SyntaxKind::TraceExpr => Expr::Trace(TraceExpr(syntax)),
             SyntaxKind::ReadExpr => Expr::Read(ReadExpr(syntax)),
+            SyntaxKind::ImportExpr => Expr::Import(ImportExpr(syntax)),
             SyntaxKind::ErrorNode => Expr::Error(ErrorNode(syntax)),
             _ => return None,
         })
@@ -1005,6 +1040,7 @@ impl AstNode for Expr {
             Expr::Throw(e) => e.syntax(),
             Expr::Trace(e) => e.syntax(),
             Expr::Read(e) => e.syntax(),
+            Expr::Import(e) => e.syntax(),
             Expr::Error(e) => e.syntax(),
         }
     }
@@ -1223,6 +1259,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    TruncDiv,
     Rem,
     Pow,
     Eq,
@@ -1280,6 +1317,7 @@ impl BinaryExpr {
             SyntaxKind::Minus => BinaryOp::Sub,
             SyntaxKind::Star => BinaryOp::Mul,
             SyntaxKind::Slash => BinaryOp::Div,
+            SyntaxKind::TildeSlash => BinaryOp::TruncDiv,
             SyntaxKind::Percent => BinaryOp::Rem,
             SyntaxKind::StarStar => BinaryOp::Pow,
             SyntaxKind::EqEq => BinaryOp::Eq,
@@ -1502,6 +1540,14 @@ impl ReadExpr {
         None
     }
 
+    pub fn argument(&self) -> Option<Expr> {
+        child_node(&self.0)
+    }
+}
+
+ast_node!(ImportExpr, SyntaxKind::ImportExpr);
+
+impl ImportExpr {
     pub fn argument(&self) -> Option<Expr> {
         child_node(&self.0)
     }

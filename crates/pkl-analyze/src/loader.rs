@@ -324,6 +324,29 @@ impl FsLoader {
         Ok(self.config.module_paths[0].join(trimmed))
     }
 
+    fn resolve_namespace_path(&self, prefix: &str, rest: &str) -> Result<PathBuf, LoadError> {
+        let root =
+            self.config
+                .namespaces
+                .get(prefix)
+                .ok_or_else(|| LoadError::UnknownNamespace {
+                    namespace: prefix.to_string(),
+                    raw: format!("{}:{}", prefix, rest),
+                })?;
+        let rest = rest.trim_start_matches('/');
+        let mut candidates = Vec::with_capacity(4);
+        push_module_candidate(&mut candidates, root.join(rest));
+        if root.join("PklProject.pkl").exists() {
+            push_module_candidate(&mut candidates, root.join(prefix).join(rest));
+        }
+        candidates
+            .iter()
+            .find(|path| path.exists())
+            .cloned()
+            .or_else(|| candidates.into_iter().next())
+            .ok_or_else(|| LoadError::Malformed(format!("empty namespace import `{}:`", prefix)))
+    }
+
     /// Resolve `raw` to an absolute path without reading it.
     pub fn resolve_path(&self, raw: &str, from: Option<&str>) -> Result<PathBuf, LoadError> {
         let raw_trimmed = raw.trim();
@@ -363,17 +386,7 @@ impl FsLoader {
             let looks_like_drive_letter =
                 prefix.len() == 1 && prefix.chars().next().unwrap().is_ascii_alphabetic();
             if !looks_like_drive_letter && is_simple_ident(prefix) {
-                return match self.config.namespaces.get(prefix) {
-                    Some(root) => {
-                        let rest = &raw_trimmed[idx + 1..];
-                        let rest = rest.trim_start_matches('/');
-                        Ok(root.join(rest))
-                    }
-                    None => Err(LoadError::UnknownNamespace {
-                        namespace: prefix.to_string(),
-                        raw: raw_trimmed.to_string(),
-                    }),
-                };
+                return self.resolve_namespace_path(prefix, &raw_trimmed[idx + 1..]);
             }
         }
 
@@ -460,6 +473,14 @@ fn is_simple_ident(s: &str) -> bool {
     s.chars().next().unwrap().is_ascii_alphabetic()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn push_module_candidate(out: &mut Vec<PathBuf>, path: PathBuf) {
+    let has_extension = path.extension().is_some();
+    out.push(path.clone());
+    if !has_extension {
+        out.push(path.with_extension("pkl"));
+    }
 }
 
 fn expand_env(input: &str) -> String {
@@ -592,6 +613,47 @@ mod tests {
             .resolve_path("switchyard:config/main.pkl", None)
             .unwrap();
         assert_eq!(p, PathBuf::from("/tmp/switchyard/config/main.pkl"));
+    }
+
+    #[test]
+    fn resolves_extensionless_namespace_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let module_path = dir.path().join("automations.pkl");
+        std::fs::write(&module_path, "").unwrap();
+
+        let mut ns = HashMap::new();
+        ns.insert("switchyard".into(), dir.path().to_path_buf());
+        let loader = FsLoader::new(FsLoaderConfig {
+            namespaces: ns,
+            ..FsLoaderConfig::default()
+        });
+
+        let p = loader
+            .resolve_path("switchyard:automations", None)
+            .unwrap();
+        assert_eq!(p, module_path);
+    }
+
+    #[test]
+    fn resolves_project_root_namespace_module_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PklProject.pkl"), r#"amends "pkl:Project""#).unwrap();
+        let module_dir = dir.path().join("switchyard");
+        std::fs::create_dir(&module_dir).unwrap();
+        let module_path = module_dir.join("automations.pkl");
+        std::fs::write(&module_path, "").unwrap();
+
+        let mut ns = HashMap::new();
+        ns.insert("switchyard".into(), dir.path().to_path_buf());
+        let loader = FsLoader::new(FsLoaderConfig {
+            namespaces: ns,
+            ..FsLoaderConfig::default()
+        });
+
+        let p = loader
+            .resolve_path("switchyard:automations", None)
+            .unwrap();
+        assert_eq!(p, module_path);
     }
 
     #[test]

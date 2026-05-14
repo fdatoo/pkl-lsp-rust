@@ -131,6 +131,7 @@ pub enum SyntaxKind {
     Minus,            // -
     Star,             // *
     Slash,            // /
+    TildeSlash,       // ~/
     Percent,          // %
     StarStar,         // **
 
@@ -183,6 +184,7 @@ pub enum SyntaxKind {
     TypeParenthesized,
     TypeStringLiteral,
     TypeConstrained,
+    TypeDefault,
     TypeModule,
     TypeUnknown,
     TypeNothing,
@@ -208,6 +210,7 @@ pub enum SyntaxKind {
     NonNullExpr,      // expr!!
     NullCoalesceExpr, // expr ?? other
     ReadExpr,
+    ImportExpr,
     ThrowExpr,
     TraceExpr,
     SuperAccessExpr,

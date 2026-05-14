@@ -51,11 +51,12 @@ fn lexes_backtick_identifier() {
 #[test]
 fn lexes_numbers() {
     assert_eq!(
-        kinds("0 12 1_000 3.14 1e5 1.0e-3 0xFF 0b1010 0o755"),
+        kinds("0 12 1_000 3.14 .5 1e5 1.0e-3 0xFF 0b1010 0o755"),
         vec![
             SyntaxKind::IntNumber,
             SyntaxKind::IntNumber,
             SyntaxKind::IntNumber,
+            SyntaxKind::FloatNumber,
             SyntaxKind::FloatNumber,
             SyntaxKind::FloatNumber,
             SyntaxKind::FloatNumber,
@@ -107,7 +108,7 @@ fn lexes_custom_delim_string() {
 #[test]
 fn lexes_operators_and_punctuation() {
     assert_eq!(
-        kinds("== != <= >= -> => ?. ?? || && ... |> **"),
+        kinds("== != <= >= -> => ?. ?? || && ... |> ** ~/"),
         vec![
             SyntaxKind::EqEq,
             SyntaxKind::BangEq,
@@ -126,6 +127,7 @@ fn lexes_operators_and_punctuation() {
             SyntaxKind::Ellipsis,
             SyntaxKind::PipeGt,
             SyntaxKind::StarStar,
+            SyntaxKind::TildeSlash,
             SyntaxKind::Eof,
         ]
     );
@@ -143,6 +145,23 @@ fn double_slash_is_a_comment_not_integer_division() {
     assert_eq!(
         kinds,
         vec![SyntaxKind::Ident, SyntaxKind::Ident, SyntaxKind::Eof]
+    );
+}
+
+#[test]
+fn adjacent_closing_brackets_stay_separate() {
+    assert_eq!(
+        kinds(r#"mapping2[mapping1["x"]]"#),
+        vec![
+            SyntaxKind::Ident,
+            SyntaxKind::LBracket,
+            SyntaxKind::Ident,
+            SyntaxKind::LBracket,
+            SyntaxKind::String,
+            SyntaxKind::RBracket,
+            SyntaxKind::RBracket,
+            SyntaxKind::Eof,
+        ]
     );
 }
 

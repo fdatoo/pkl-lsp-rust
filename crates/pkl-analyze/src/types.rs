@@ -104,6 +104,7 @@ impl Ty {
             "nothing" | "Nothing" => Ty::Nothing,
             "Boolean" => Ty::Boolean,
             "Int" => Ty::Int,
+            "Int8" | "Int16" | "Int32" | "UInt" | "UInt8" | "UInt16" | "UInt32" => Ty::Int,
             "Float" => Ty::Float,
             "Number" => Ty::Number,
             "String" => Ty::Str,
@@ -158,6 +159,14 @@ impl Ty {
                 .map(|t| Ty::from_cst_type(&t))
                 .unwrap_or(Ty::Unknown),
             cst::Type::StringLiteral(_) => Ty::Str,
+            cst::Type::Constrained(c) => c
+                .inner()
+                .map(|t| Ty::from_cst_type(&t))
+                .unwrap_or(Ty::Unknown),
+            cst::Type::Default(d) => d
+                .inner()
+                .map(|t| Ty::from_cst_type(&t))
+                .unwrap_or(Ty::Unknown),
             cst::Type::Unknown(_) => Ty::Unknown,
             cst::Type::Nothing(_) => Ty::Nothing,
             cst::Type::Module(_) => Ty::Module,

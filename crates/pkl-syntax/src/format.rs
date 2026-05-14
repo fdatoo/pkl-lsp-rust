@@ -49,20 +49,30 @@ pub fn format_module(module: &Module) -> String {
 
     let items: Vec<cst::Item> = module.items().collect();
     let mut first_item = true;
-    for item in &items {
+    let mut i = 0usize;
+    while i < items.len() {
+        let item = &items[i];
         let pre = collect_leading_comments(item.syntax());
         if !pre.is_empty() {
-            if !out.is_empty() && !out.ends_with("\n\n") {
-                out.push('\n');
-            }
+            ensure_blank_line(&mut out);
             for c in &pre {
-                out.push_str(c);
+                if !c.is_empty() {
+                    out.push_str(c);
+                }
                 out.push('\n');
             }
-        } else if !out.is_empty() && (!first_item || !out.ends_with("\n\n")) {
-            out.push('\n');
+        } else if !out.is_empty() && !first_item {
+            ensure_blank_line(&mut out);
+        } else if !out.is_empty() && !out.ends_with("\n\n") {
+            ensure_blank_line(&mut out);
         }
-        write_item(&mut out, item, ctx);
+        if let Some(end) = property_group_end(&items, i) {
+            write_property_group(&mut out, &items[i..end], ctx);
+            i = end;
+        } else {
+            write_item(&mut out, item, ctx);
+            i += 1;
+        }
         first_item = false;
     }
 
@@ -70,6 +80,17 @@ pub fn format_module(module: &Module) -> String {
         out.push('\n');
     }
     out
+}
+
+fn ensure_blank_line(out: &mut String) {
+    if out.is_empty() || out.ends_with("\n\n") {
+        return;
+    }
+    if out.ends_with('\n') {
+        out.push('\n');
+    } else {
+        out.push_str("\n\n");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -98,9 +119,13 @@ impl FmtCtx {
 /// surrounding whitespace.
 fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
     let mut out = Vec::new();
+    let detached_doc = has_detached_doc_comment(node);
     for el in node.children_with_tokens() {
         match el.into_token() {
             Some(t) if t.kind().is_trivia() => match t.kind() {
+                SyntaxKind::DocComment if detached_doc => {
+                    out.push(t.text().to_owned());
+                }
                 SyntaxKind::LineComment | SyntaxKind::BlockComment => {
                     out.push(t.text().to_owned());
                 }
@@ -109,7 +134,32 @@ fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
             _ => break,
         }
     }
+    if detached_doc && !out.is_empty() {
+        out.push(String::new());
+    }
     out
+}
+
+fn has_detached_doc_comment(node: &SyntaxNode) -> bool {
+    let mut saw_doc = false;
+    let mut newlines_since_doc = 0usize;
+    for tok in leading_trivia_tokens(node) {
+        match tok.kind() {
+            SyntaxKind::DocComment => {
+                saw_doc = true;
+                newlines_since_doc = 0;
+            }
+            SyntaxKind::Newline if saw_doc => {
+                newlines_since_doc += 1;
+            }
+            SyntaxKind::Whitespace if saw_doc => {}
+            _ => {
+                saw_doc = false;
+                newlines_since_doc = 0;
+            }
+        }
+    }
+    saw_doc && newlines_since_doc >= 2
 }
 
 /// Pull the doc-comment text out of `node`'s leading trivia, falling
@@ -118,7 +168,16 @@ fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
 /// here so the formatter does not need to handle the `Option<String>`
 /// indirection at every site.
 fn doc_for(node: &SyntaxNode) -> Option<String> {
+    if has_detached_doc_comment(node) {
+        return None;
+    }
     cst::doc_comment_for(node)
+}
+
+fn leading_trivia_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + '_ {
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .take_while(|t| t.kind().is_trivia())
 }
 
 // ----------------------------------------------------------------------
@@ -193,6 +252,80 @@ fn write_item(out: &mut String, item: &cst::Item, ctx: FmtCtx) {
         cst::Item::Property(p) => write_property(out, p, ctx),
         cst::Item::Method(m) => write_method(out, m, ctx),
         cst::Item::Error(_) => {}
+    }
+}
+
+fn property_group_end(items: &[cst::Item], start: usize) -> Option<usize> {
+    let cst::Item::Property(first) = &items[start] else {
+        return None;
+    };
+    if !is_alignable_top_level_property(first) {
+        return None;
+    }
+    let mut end = start + 1;
+    while end < items.len() {
+        let cst::Item::Property(p) = &items[end] else {
+            break;
+        };
+        if !is_alignable_top_level_property(p) || !collect_leading_comments(p.syntax()).is_empty()
+        {
+            break;
+        }
+        end += 1;
+    }
+    (end > start + 1).then_some(end)
+}
+
+fn is_alignable_top_level_property(p: &PropertyDecl) -> bool {
+    p.ty().is_some()
+        && p.name().is_some()
+        && doc_for(p.syntax()).is_none()
+        && p.annotations().next().is_none()
+        && p.modifiers().next().is_none()
+}
+
+fn write_property_group(out: &mut String, items: &[cst::Item], ctx: FmtCtx) {
+    let props: Vec<PropertyDecl> = items
+        .iter()
+        .filter_map(|item| match item {
+            cst::Item::Property(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    let type_col = props
+        .iter()
+        .filter_map(|p| p.name())
+        .map(|name| cst::ident_text(&name).len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    for (idx, p) in props.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        write_property_aligned(out, p, ctx, type_col);
+    }
+}
+
+fn write_property_aligned(out: &mut String, p: &PropertyDecl, ctx: FmtCtx, type_col: usize) {
+    out.push_str(&ctx.pad());
+    let Some(name) = p.name() else {
+        return;
+    };
+    let name = cst::ident_text(&name);
+    out.push_str(&name);
+    if let Some(t) = p.ty() {
+        out.push(':');
+        let spaces = type_col.saturating_sub(name.len() + 1).max(1);
+        out.push_str(&" ".repeat(spaces));
+        out.push_str(&format_type(&t));
+    }
+    if let Some(PropertyValue::Expr(e)) = p.value() {
+        out.push_str(" = ");
+        write_expr(out, &e, ctx);
+    } else if let Some(PropertyValue::ObjectBody(body)) = p.value() {
+        out.push(' ');
+        write_object_body(out, &body, ctx);
     }
 }
 
@@ -502,6 +635,7 @@ fn write_object_body(out: &mut String, body: &ObjectBody, ctx: FmtCtx) {
     }
     if members.len() == 1
         && params.is_empty()
+        && ctx.indent > 0
         && collect_leading_comments(members[0].syntax()).is_empty()
     {
         out.push_str("{ ");
@@ -642,6 +776,7 @@ fn write_expr(out: &mut String, expr: &Expr, ctx: FmtCtx) {
         Expr::Throw(t) => write_throw(out, t, ctx),
         Expr::Trace(t) => write_trace(out, t, ctx),
         Expr::Read(r) => write_read(out, r, ctx),
+        Expr::Import(i) => write_import_expr(out, i, ctx),
         Expr::Error(_) => out.push_str("<error>"),
     }
 }
@@ -743,6 +878,7 @@ fn write_binary(out: &mut String, b: &BinaryExpr, ctx: FmtCtx) {
         Some(BinaryOp::Sub) => "-",
         Some(BinaryOp::Mul) => "*",
         Some(BinaryOp::Div) => "/",
+        Some(BinaryOp::TruncDiv) => "~/",
         Some(BinaryOp::Rem) => "%",
         Some(BinaryOp::Pow) => "**",
         Some(BinaryOp::Eq) => "==",
@@ -948,6 +1084,14 @@ fn write_read(out: &mut String, r: &ReadExpr, ctx: FmtCtx) {
     out.push(')');
 }
 
+fn write_import_expr(out: &mut String, i: &cst::ImportExpr, ctx: FmtCtx) {
+    out.push_str("import*(");
+    if let Some(arg) = i.argument() {
+        write_expr(out, &arg, ctx);
+    }
+    out.push(')');
+}
+
 // ----------------------------------------------------------------------
 // Types
 
@@ -972,6 +1116,26 @@ fn write_type(out: &mut String, ty: &Type) {
         Type::StringLiteral(s) => {
             if let Some(t) = s.token() {
                 out.push_str(t.text());
+            }
+        }
+        Type::Constrained(c) => {
+            if let Some(inner) = c.inner() {
+                write_type(out, &inner);
+            }
+            let constraints = c.constraints();
+            out.push('(');
+            for (i, constraint) in constraints.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_expr(out, constraint, FmtCtx { indent: 0 });
+            }
+            out.push(')');
+        }
+        Type::Default(d) => {
+            out.push('*');
+            if let Some(inner) = d.inner() {
+                write_type(out, &inner);
             }
         }
         Type::Unknown(_) => out.push_str("unknown"),
@@ -1138,6 +1302,29 @@ mod tests {
         let src = "/// my prop\nfoo: Int = 1\n";
         let out = format_str(src);
         assert!(out.contains("/// my prop"), "{out}");
+    }
+
+    #[test]
+    fn formats_switchyard_scene_layout() {
+        let src = r#"module switchyard.scene
+
+import "switchyard:automations" as auto
+
+/// Single-Scene template. Files that own one scene amend this module.
+/// Amending files must re-import `switchyard:automations` to reference
+/// action subclasses.
+
+id:          String(!isEmpty)
+displayName: String
+areaId:      String? = null
+actions:     Listing<auto.Action> = new {}
+
+output {
+  renderer = new JsonRenderer {}
+}
+"#;
+        let out = format_str(src);
+        assert_eq!(out, src);
     }
 
     #[test]

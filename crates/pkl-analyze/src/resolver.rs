@@ -642,6 +642,19 @@ impl Resolver {
                     self.resolve_type(&inner, scope);
                 }
             }
+            Type::Constrained(c) => {
+                if let Some(inner) = c.inner() {
+                    self.resolve_type(&inner, scope);
+                }
+                for constraint in c.constraints() {
+                    self.resolve_expr(&constraint, scope);
+                }
+            }
+            Type::Default(d) => {
+                if let Some(inner) = d.inner() {
+                    self.resolve_type(&inner, scope);
+                }
+            }
             Type::Parenthesized(p) => {
                 if let Some(inner) = p.inner() {
                     self.resolve_type(&inner, scope);
@@ -851,6 +864,11 @@ impl Resolver {
             }
             Expr::Read(r) => {
                 if let Some(arg) = r.argument() {
+                    self.resolve_expr(&arg, scope);
+                }
+            }
+            Expr::Import(i) => {
+                if let Some(arg) = i.argument() {
                     self.resolve_expr(&arg, scope);
                 }
             }

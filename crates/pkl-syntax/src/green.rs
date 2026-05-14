@@ -123,6 +123,13 @@ impl<'src> Parser<'src> {
         self.peek_kind() == k
     }
 
+    fn current_has_leading_newline(&self) -> bool {
+        let current = self.skip_trivia_from(self.pos);
+        self.tokens[self.pos..current]
+            .iter()
+            .any(|t| t.kind == SyntaxKind::Newline)
+    }
+
     fn at_eof(&self) -> bool {
         let i = self.skip_trivia_from(self.pos);
         i >= self.tokens.len() || matches!(self.tokens[i].kind, SyntaxKind::Eof)
@@ -530,6 +537,7 @@ impl<'src> Parser<'src> {
                     }
                 }
             }
+            while self.eat(SyntaxKind::Semicolon) {}
         }
         self.expect(SyntaxKind::RBrace, "closing `}`");
         self.finish_node();
@@ -573,9 +581,16 @@ impl<'src> Parser<'src> {
         if self.eat(SyntaxKind::Eq) {
             self.parse_expr();
         } else if self.at(SyntaxKind::LBrace) {
-            self.parse_object_body();
+            self.parse_object_body_chain();
         }
         self.finish_node();
+    }
+
+    fn parse_object_body_chain(&mut self) {
+        self.parse_object_body();
+        while self.at(SyntaxKind::LBrace) {
+            self.parse_object_body();
+        }
     }
 
     fn parse_method(&mut self, cp: Checkpoint) {
@@ -634,7 +649,11 @@ impl<'src> Parser<'src> {
         self.bump(); // (
         while !self.at_eof() && !self.at(SyntaxKind::RParen) {
             self.parse_parameter();
-            if !self.eat(SyntaxKind::Comma) {
+            if self.eat(SyntaxKind::Comma) {
+                if self.at(SyntaxKind::RParen) {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -672,7 +691,7 @@ impl<'src> Parser<'src> {
 
     fn parse_type_nullable(&mut self) {
         let cp = self.checkpoint();
-        self.parse_type_primary();
+        self.parse_type_constrained();
         while self.at(SyntaxKind::Question) {
             self.bump(); // ?
             self.start_node_at(cp, SyntaxKind::TypeNullable);
@@ -680,9 +699,25 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn parse_type_constrained(&mut self) {
+        let cp = self.checkpoint();
+        self.parse_type_primary();
+        while self.at(SyntaxKind::LParen) {
+            self.parse_constraint_list();
+            self.start_node_at(cp, SyntaxKind::TypeConstrained);
+            self.finish_node();
+        }
+    }
+
     fn parse_type_primary(&mut self) {
         match self.peek_kind() {
             SyntaxKind::LParen => self.parse_type_paren_or_function(),
+            SyntaxKind::Star => {
+                self.start_node(SyntaxKind::TypeDefault);
+                self.bump();
+                self.parse_type_primary();
+                self.finish_node();
+            }
             SyntaxKind::UnknownKw => {
                 self.start_node(SyntaxKind::TypeUnknown);
                 self.bump();
@@ -724,6 +759,23 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn parse_constraint_list(&mut self) {
+        self.start_node(SyntaxKind::ArgList);
+        self.bump(); // (
+        while !self.at_eof() && !self.at(SyntaxKind::RParen) {
+            self.parse_expr();
+            if self.eat(SyntaxKind::Comma) {
+                if self.at(SyntaxKind::RParen) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RParen, "closing `)`");
+        self.finish_node();
+    }
+
     fn parse_type_paren_or_function(&mut self) {
         let cp = self.checkpoint();
         self.bump(); // (
@@ -734,6 +786,9 @@ impl<'src> Parser<'src> {
             count += 1;
             while self.eat(SyntaxKind::Comma) {
                 saw_comma = true;
+                if self.at(SyntaxKind::RParen) {
+                    break;
+                }
                 self.parse_type();
                 count += 1;
             }
@@ -768,7 +823,11 @@ impl<'src> Parser<'src> {
         self.bump(); // <
         while !self.at_eof() && !self.at(SyntaxKind::Gt) {
             self.parse_type();
-            if !self.eat(SyntaxKind::Comma) {
+            if self.eat(SyntaxKind::Comma) {
+                if self.at(SyntaxKind::Gt) {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -853,13 +912,13 @@ impl<'src> Parser<'src> {
                 }
                 SyntaxKind::IsKw => {
                     self.bump();
-                    self.parse_type_nullable();
+                    self.parse_type();
                     self.start_node_at(cp, SyntaxKind::TypeCheckExpr);
                     self.finish_node();
                 }
                 SyntaxKind::AsKw => {
                     self.bump();
-                    self.parse_type_nullable();
+                    self.parse_type();
                     self.start_node_at(cp, SyntaxKind::TypeCastExpr);
                     self.finish_node();
                 }
@@ -884,7 +943,7 @@ impl<'src> Parser<'src> {
         self.parse_expr_pow();
         while matches!(
             self.peek_kind(),
-            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::Percent
+            SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::TildeSlash | SyntaxKind::Percent
         ) {
             self.bump();
             self.parse_expr_pow();
@@ -941,7 +1000,7 @@ impl<'src> Parser<'src> {
                     self.start_node_at(cp, SyntaxKind::CallExpr);
                     self.finish_node();
                 }
-                SyntaxKind::LBracket => {
+                SyntaxKind::LBracket if !self.current_has_leading_newline() => {
                     self.parse_index_tail();
                     self.start_node_at(cp, SyntaxKind::IndexExpr);
                     self.finish_node();
@@ -984,7 +1043,11 @@ impl<'src> Parser<'src> {
         self.bump(); // (
         while !self.at_eof() && !self.at(SyntaxKind::RParen) {
             self.parse_expr();
-            if !self.eat(SyntaxKind::Comma) {
+            if self.eat(SyntaxKind::Comma) {
+                if self.at(SyntaxKind::RParen) {
+                    break;
+                }
+            } else {
                 break;
             }
         }
@@ -1049,6 +1112,14 @@ impl<'src> Parser<'src> {
             }
             SyntaxKind::ReadKw | SyntaxKind::ReadOrNullKw | SyntaxKind::ReadGlobKw => {
                 self.start_node(SyntaxKind::ReadExpr);
+                self.bump();
+                self.expect(SyntaxKind::LParen, "`(`");
+                self.parse_expr();
+                self.expect(SyntaxKind::RParen, "closing `)`");
+                self.finish_node();
+            }
+            SyntaxKind::ImportGlobKw => {
+                self.start_node(SyntaxKind::ImportExpr);
                 self.bump();
                 self.expect(SyntaxKind::LParen, "`(`");
                 self.parse_expr();
@@ -1222,7 +1293,11 @@ impl<'src> Parser<'src> {
             self.start_node(SyntaxKind::ParameterList);
             loop {
                 self.parse_parameter();
-                if !self.eat(SyntaxKind::Comma) {
+                if self.eat(SyntaxKind::Comma) {
+                    if self.at(SyntaxKind::Arrow) {
+                        break;
+                    }
+                } else {
                     break;
                 }
             }
@@ -1251,13 +1326,22 @@ impl<'src> Parser<'src> {
             }
             i += 1;
             if self.nth(i) == SyntaxKind::Colon {
-                let mut depth = 0i32;
+                let mut paren_depth = 0i32;
+                let mut angle_depth = 0i32;
                 i += 1;
                 loop {
                     match self.nth(i) {
-                        SyntaxKind::Lt | SyntaxKind::LParen => depth += 1,
-                        SyntaxKind::Gt | SyntaxKind::RParen => depth -= 1,
-                        SyntaxKind::Comma | SyntaxKind::Arrow if depth == 0 => break,
+                        SyntaxKind::LParen => paren_depth += 1,
+                        SyntaxKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                        SyntaxKind::Lt if paren_depth == 0 => angle_depth += 1,
+                        SyntaxKind::Gt if paren_depth == 0 && angle_depth > 0 => {
+                            angle_depth -= 1
+                        }
+                        SyntaxKind::Comma | SyntaxKind::Arrow
+                            if paren_depth == 0 && angle_depth == 0 =>
+                        {
+                            break
+                        }
                         SyntaxKind::RBrace | SyntaxKind::Eof => return false,
                         _ => {}
                     }
@@ -1267,6 +1351,9 @@ impl<'src> Parser<'src> {
             match self.nth(i) {
                 SyntaxKind::Arrow => return true,
                 SyntaxKind::Comma => {
+                    if self.nth(i + 1) == SyntaxKind::Arrow {
+                        return true;
+                    }
                     i += 1;
                     continue;
                 }
@@ -1317,10 +1404,26 @@ impl<'src> Parser<'src> {
                 if self.eat(SyntaxKind::Eq) {
                     self.parse_expr();
                 } else if self.at(SyntaxKind::LBrace) {
-                    self.parse_object_body();
+                    self.parse_object_body_chain();
                 } else {
                     let span = self.peek_span();
                     self.error(span, "expected `=` or `{` after `[key]`");
+                }
+                self.finish_node();
+            }
+            SyntaxKind::LDoubleBracket => {
+                self.start_node(SyntaxKind::ObjectEntryComputed);
+                self.bump();
+                self.parse_expr();
+                self.expect(SyntaxKind::RBracket, "closing `]`");
+                self.expect(SyntaxKind::RBracket, "closing `]`");
+                if self.eat(SyntaxKind::Eq) {
+                    self.parse_expr();
+                } else if self.at(SyntaxKind::LBrace) {
+                    self.parse_object_body_chain();
+                } else {
+                    let span = self.peek_span();
+                    self.error(span, "expected `=` or `{` after `[[key]]`");
                 }
                 self.finish_node();
             }
@@ -1368,19 +1471,22 @@ impl<'src> Parser<'src> {
         }
         i += 1;
         if self.nth(i) == SyntaxKind::Colon {
-            let mut depth = 0i32;
+            let mut paren_depth = 0i32;
+            let mut angle_depth = 0i32;
             i += 1;
             loop {
                 match self.nth(i) {
-                    SyntaxKind::Lt | SyntaxKind::LParen => depth += 1,
-                    SyntaxKind::Gt | SyntaxKind::RParen => depth -= 1,
-                    SyntaxKind::Eq if depth == 0 => return true,
-                    SyntaxKind::LBrace if depth == 0 => return true,
+                    SyntaxKind::LParen => paren_depth += 1,
+                    SyntaxKind::RParen if paren_depth > 0 => paren_depth -= 1,
+                    SyntaxKind::Lt if paren_depth == 0 => angle_depth += 1,
+                    SyntaxKind::Gt if paren_depth == 0 && angle_depth > 0 => angle_depth -= 1,
+                    SyntaxKind::Eq if paren_depth == 0 && angle_depth == 0 => return true,
+                    SyntaxKind::LBrace if paren_depth == 0 && angle_depth == 0 => return true,
                     SyntaxKind::Semicolon
                     | SyntaxKind::Comma
                     | SyntaxKind::RBrace
                     | SyntaxKind::Eof
-                        if depth == 0 =>
+                        if paren_depth == 0 && angle_depth == 0 =>
                     {
                         return false
                     }
@@ -1499,6 +1605,19 @@ mod tests {
             "typealias StringMap<V> = Map<String, V>\n\
              class Box<out T> {\n  value: T\n}\n",
         );
+    }
+
+    #[test]
+    fn rt_constrained_and_default_types() {
+        round_trip(
+            "class Fibonacci {\n  function fib(n: Int(this >= 0)): Int(this >= 0) = n\n}\n\
+             local typealias PklJobs = Mapping<String, *Workflow.Job>\n",
+        );
+    }
+
+    #[test]
+    fn rt_import_glob_expression() {
+        round_trip("fruit = import*(\"@fruities/catalog/*.pkl\")\n");
     }
 
     #[test]

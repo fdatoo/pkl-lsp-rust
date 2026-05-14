@@ -71,15 +71,15 @@ impl Backend {
         }
     }
 
-    /// Re-issue diagnostics for the given URL. Pulls both syntax errors
-    /// (from the local document analysis) and any import-resolution errors
-    /// surfaced by the module graph.
+    /// Re-issue diagnostics for the given URL. Pulls local parser/analyzer
+    /// diagnostics plus any import-resolution errors surfaced by the module
+    /// graph.
     async fn publish_diagnostics(&self, uri: &Url) {
         let Some(doc) = self.documents.get(uri) else {
             return;
         };
         let mut diags: Vec<Diagnostic> = doc
-            .parsed
+            .analysis
             .diagnostics
             .iter()
             .map(|d| Diagnostic {

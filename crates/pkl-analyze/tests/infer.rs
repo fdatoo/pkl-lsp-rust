@@ -457,6 +457,45 @@ fn diagnostic_for_type_mismatch_in_property() {
 }
 
 #[test]
+fn unsigned_integral_alias_accepts_integer_literal() {
+    let src = r#"
+class MCPConfig {
+  evalResultMaxBytes: UInt = 65536
+  readFileMaxBytes: UInt = 1048576
+  entitySubscriptionBuffer: UInt = 256
+  traceSubscriptionBuffer: UInt = 1024
+  tailDefaultWaitSeconds: UInt = 0
+  tailMaxWaitSeconds: UInt = 60
+}
+"#;
+    let a = analyze_clean(src);
+    assert!(
+        a.diagnostics
+            .iter()
+            .all(|d| !d.message.contains("type mismatch")),
+        "unexpected diagnostics: {:#?}",
+        a.diagnostics
+    );
+}
+
+#[test]
+fn empty_collection_constructor_uses_expected_type() {
+    let src = r#"
+trustedProxies: List<String> = List()
+ids: Set<Int> = Set()
+lookup: Map<String, Int> = Map()
+"#;
+    let a = analyze_clean(src);
+    assert!(
+        a.diagnostics
+            .iter()
+            .all(|d| !d.message.contains("type mismatch")),
+        "unexpected diagnostics: {:#?}",
+        a.diagnostics
+    );
+}
+
+#[test]
 fn no_diagnostic_when_inferrer_is_unsure() {
     // `unknownThing` has no type — be permissive.
     let src = "name: String = unknownThing";

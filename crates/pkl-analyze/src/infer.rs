@@ -415,6 +415,19 @@ impl Inferrer<'_> {
                     self.walk_type(&inner);
                 }
             }
+            Type::Constrained(c) => {
+                if let Some(inner) = c.inner() {
+                    self.walk_type(&inner);
+                }
+                for constraint in c.constraints() {
+                    self.infer_expr(&constraint);
+                }
+            }
+            Type::Default(d) => {
+                if let Some(inner) = d.inner() {
+                    self.walk_type(&inner);
+                }
+            }
             Type::Parenthesized(p) => {
                 if let Some(inner) = p.inner() {
                     self.walk_type(&inner);
@@ -1212,6 +1225,12 @@ impl Inferrer<'_> {
                     None => Ty::Unknown,
                 }
             }
+            Expr::Import(i) => {
+                if let Some(arg) = i.argument() {
+                    self.infer_expr(&arg);
+                }
+                Ty::Mapping(Box::new(Ty::Str), Box::new(Ty::Module))
+            }
             Expr::Error(_) => Ty::Unknown,
         };
         self.record(span, ty.clone());
@@ -1256,7 +1275,8 @@ impl Inferrer<'_> {
                                         unify(declared, actual, &type_vars, &mut env);
                                     }
                                 }
-                                return parsed.return_ty.substitute(&env);
+                                let ret = parsed.return_ty.substitute(&env);
+                                return self.apply_empty_constructor_context(&ret, args.is_empty());
                             }
                         }
                     }
@@ -1268,6 +1288,23 @@ impl Inferrer<'_> {
         match callee_ty {
             Ty::Function { ret, .. } => *ret,
             _ => Ty::Unknown,
+        }
+    }
+
+    fn apply_empty_constructor_context(&self, ret: &Ty, is_empty_call: bool) -> Ty {
+        if !is_empty_call {
+            return ret.clone();
+        }
+        let Some(expected) = &self.expected_context else {
+            return ret.clone();
+        };
+        match (ret, expected) {
+            (Ty::List(_), Ty::List(_))
+            | (Ty::Set(_), Ty::Set(_))
+            | (Ty::Map(_, _), Ty::Map(_, _))
+            | (Ty::Listing(_), Ty::Listing(_))
+            | (Ty::Mapping(_, _), Ty::Mapping(_, _)) => expected.clone(),
+            _ => ret.clone(),
         }
     }
 
@@ -1520,7 +1557,7 @@ fn infer_binary(op: BinaryOp, l: &Ty, r: &Ty) -> Ty {
                 join_numeric(l, r)
             }
         }
-        Sub | Mul | Rem | Pow | Div => join_numeric(l, r),
+        Sub | Mul | Rem | Pow | Div | TruncDiv => join_numeric(l, r),
         Pipeline => r.clone(),
     }
 }

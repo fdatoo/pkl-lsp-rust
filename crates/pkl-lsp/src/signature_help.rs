@@ -52,10 +52,13 @@ pub fn signature_help_at(doc: &Document, position: Position) -> Option<Signature
     let mut depth_paren = 0i32;
     let mut depth_lt = 0i32;
     let start = span.start as usize;
-    for (i, &b) in bytes[start..offset as usize].iter().enumerate() {
-        if i == 0 && b == b'(' {
-            continue;
-        }
+    let end = offset as usize;
+    let scan_start = bytes[start..end]
+        .iter()
+        .position(|&b| b == b'(')
+        .map(|i| start + i + 1)
+        .unwrap_or(start);
+    for &b in &bytes[scan_start..end] {
         match b {
             b'(' => depth_paren += 1,
             b')' if depth_paren > 0 => depth_paren -= 1,
@@ -300,6 +303,11 @@ fn walk_expr(expr: &Expr, offset: u32, best: &mut Option<Expr>) {
                 walk_expr(&arg, offset, best);
             }
         }
+        Expr::Import(i) => {
+            if let Some(arg) = i.argument() {
+                walk_expr(&arg, offset, best);
+            }
+        }
         _ => {}
     }
 }
@@ -392,5 +400,28 @@ fn extract_parameters(signature: &str) -> Option<Vec<ParameterInformation>> {
         None
     } else {
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Document;
+
+    #[test]
+    fn active_parameter_counts_from_argument_list() {
+        let src = "endpointHost: String = \"api\"\n\
+function render(host: String, port: Int): String = host\n\
+description = render(endpointHost, 443)\n";
+        let doc = Document::new(src.to_string(), 1);
+        let position = Position {
+            line: 2,
+            character: "description = render(endpointHost, 4".len() as u32,
+        };
+
+        let help = signature_help_at(&doc, position).expect("signature help");
+
+        assert_eq!(help.active_parameter, Some(1));
+        assert_eq!(help.signatures[0].active_parameter, Some(1));
     }
 }

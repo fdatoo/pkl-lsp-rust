@@ -167,9 +167,9 @@ fn classify(doc: &Document, token: &Token<'_>) -> Option<(u32, u32)> {
         String | MultilineString => (TT_STRING, 0),
         IntNumber | FloatNumber | HexNumber | BinNumber | OctNumber => (TT_NUMBER, 0),
         // Plus / minus / etc. — keep operators distinct from keywords.
-        Plus | Minus | Star | Slash | Percent | StarStar | EqEq | BangEq | LtEq | GtEq | Lt
-        | Gt | Bang | Eq | Arrow | FatArrow | QuestionDot | QuestionQuestion | Pipe | PipeGt
-        | Amp | Question => (TT_OPERATOR, 0),
+        Plus | Minus | Star | Slash | TildeSlash | Percent | StarStar | EqEq | BangEq | LtEq
+        | GtEq | Lt | Gt | Bang | Eq | Arrow | FatArrow | QuestionDot | QuestionQuestion
+        | Pipe | PipeGt | Amp | Question => (TT_OPERATOR, 0),
         Ident | QuotedIdent => {
             // Use the resolver to refine the classification.
             let mods = MOD_READONLY;

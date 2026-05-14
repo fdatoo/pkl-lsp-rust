@@ -61,16 +61,16 @@ pub fn hover_at(
     let symbol = doc.analysis.resolution.symbol(symbol_id);
     let value = hover_markdown(&doc.analysis.resolution, symbol);
 
-    let range = if symbol.origin.is_stdlib() {
-        doc.analysis
-            .resolution
-            .references
-            .iter()
-            .find(|r| r.symbol == symbol_id && r.span.touches(offset))
-            .map(|r| doc.span_to_range(r.span))
-    } else {
-        Some(doc.span_to_range(symbol.name_span))
-    };
+    let range = doc
+        .analysis
+        .resolution
+        .references
+        .iter()
+        .find(|r| r.symbol == symbol_id && r.span.touches(offset))
+        .map(|r| doc.span_to_range(r.span))
+        .or_else(|| {
+            (!symbol.origin.is_stdlib()).then(|| doc.span_to_range(symbol.name_span))
+        });
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {

@@ -290,6 +290,11 @@ fn walk_expr(expr: &Expr, offset: u32, out: &mut Vec<Span>) {
                 walk_expr(&arg, offset, out);
             }
         }
+        Expr::Import(i) => {
+            if let Some(arg) = i.argument() {
+                walk_expr(&arg, offset, out);
+            }
+        }
         _ => {}
     }
 }
