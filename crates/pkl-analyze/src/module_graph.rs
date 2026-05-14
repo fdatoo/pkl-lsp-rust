@@ -470,8 +470,8 @@ mod tests {
         .unwrap();
 
         let mut graph = ModuleGraph::new(loader_with_namespaces(Map::new()));
-        let a_uri = format!("file://{}", a.canonicalize().unwrap().display());
-        let b_uri = format!("file://{}", b.display());
+        let a_uri = path_to_uri(&a.canonicalize().unwrap());
+        let b_uri = path_to_uri(&b.canonicalize().unwrap());
         let b_src = std::fs::read_to_string(&b).unwrap();
         graph.upsert(b_uri.clone(), b_src.clone(), true);
 
