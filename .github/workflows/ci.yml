@@ -37,6 +37,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -50,6 +52,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
@@ -61,6 +65,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       # Library + binary targets only. `--all-targets` pulls in dev-deps
       # (criterion, etc.) whose MSRV moves faster than ours; we only
       # guarantee the shipped surface.

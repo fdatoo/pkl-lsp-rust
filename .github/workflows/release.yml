@@ -46,6 +46,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-bin: false
           key: release-${{ matrix.target }}
 
       - name: Build
