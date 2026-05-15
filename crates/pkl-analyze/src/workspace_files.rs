@@ -8,8 +8,8 @@
 //! Resolution of an `import "..."` cursor context is then a two-step
 //! filter over [`WorkspaceIndex::files`]:
 //!
-//! 1. Normalise every candidate into a path *relative to the importer's
-//!    directory* (`../sibling.pkl`, `subdir/foo.pkl`, …).
+//! 1. Normalise every candidate into an extensionless path *relative to
+//!    the importer's directory* (`../sibling`, `subdir/foo`, …).
 //! 2. Keep only the candidates whose relative form starts with the
 //!    prefix the user has typed inside the quotes, then rank them by
 //!    directory affinity to the importer.
@@ -152,15 +152,23 @@ impl WorkspaceIndex {
             if !rel.starts_with(prefix) {
                 continue;
             }
+            let insert = strip_pkl_extension(&rel);
             let display = candidate
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(&rel)
+                .strip_suffix(".pkl")
+                .unwrap_or_else(|| {
+                    candidate
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&rel)
+                })
                 .to_string();
             let score = score_relative(&rel);
             out.push(ImportCompletion {
                 display,
-                insert: rel,
+                insert,
                 kind: ImportCompletionKind::WorkspaceFile,
                 score,
             });
@@ -326,6 +334,10 @@ fn score_relative(rel: &str) -> i32 {
     parent_jumps * 100 + depth * 10
 }
 
+fn strip_pkl_extension(path: &str) -> String {
+    path.strip_suffix(".pkl").unwrap_or(path).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,12 +423,12 @@ mod tests {
         // Prefix `sib` filters to the sibling file.
         let sib = index.completions_for(&main, "sib");
         assert_eq!(sib.len(), 1);
-        assert_eq!(sib[0].insert, "sibling.pkl");
+        assert_eq!(sib[0].insert, "sibling");
 
         // Prefix `sub` filters to the descent.
         let sub = index.completions_for(&main, "sub");
         assert_eq!(sub.len(), 1);
-        assert!(sub[0].insert.contains("leaf.pkl"));
+        assert!(sub[0].insert.contains("leaf"));
     }
 
     #[test]
@@ -432,8 +444,8 @@ mod tests {
         let main = root.join("main.pkl");
         let ranked = index.completions_for(&main, "");
         let inserts: Vec<_> = ranked.iter().map(|c| c.insert.clone()).collect();
-        let idx_alpha = inserts.iter().position(|s| s == "alpha.pkl").unwrap();
-        let idx_beta = inserts.iter().position(|s| s == "nested/beta.pkl").unwrap();
+        let idx_alpha = inserts.iter().position(|s| s == "alpha").unwrap();
+        let idx_beta = inserts.iter().position(|s| s == "nested/beta").unwrap();
         assert!(
             idx_alpha < idx_beta,
             "expected alpha (same dir) ahead of nested/beta, got {:?}",
@@ -454,13 +466,13 @@ mod tests {
 
         let comps = index.completions_for(&main, "");
         let inserts: Vec<_> = comps.iter().map(|c| c.insert.clone()).collect();
-        assert!(inserts.contains(&"peer.pkl".to_string()));
-        assert!(inserts.contains(&"../top.pkl".to_string()));
+        assert!(inserts.contains(&"peer".to_string()));
+        assert!(inserts.contains(&"../top".to_string()));
 
         // Prefix matching against `../`.
         let parents = index.completions_for(&main, "../");
         assert_eq!(parents.len(), 1);
-        assert_eq!(parents[0].insert, "../top.pkl");
+        assert_eq!(parents[0].insert, "../top");
     }
 
     #[test]
@@ -493,7 +505,7 @@ mod tests {
         index.add(root.join("late.pkl"));
         let comps = index.completions_for(&root.join("main.pkl"), "");
         assert_eq!(comps.len(), 1);
-        assert_eq!(comps[0].insert, "late.pkl");
+        assert_eq!(comps[0].insert, "late");
     }
 
     #[test]

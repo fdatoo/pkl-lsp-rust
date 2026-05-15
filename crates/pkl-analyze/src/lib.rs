@@ -53,6 +53,7 @@ pub fn analyze(syntax: &SyntaxNode, syntax_diagnostics: Vec<SyntaxDiagnostic>) -
     let resolution = resolve_module(&module);
     let inference = infer_module(&module, &resolution);
     let mut diagnostics = syntax_diagnostics;
+    diagnostics.extend(resolution.diagnostics.iter().cloned());
     diagnostics.extend(inference.diagnostics.iter().cloned());
     Analysis {
         resolution,

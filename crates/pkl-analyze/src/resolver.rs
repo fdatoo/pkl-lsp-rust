@@ -24,7 +24,7 @@ use pkl_syntax::cst::{
     PropertyValue, Type, TypeAliasDecl, TypeParameter,
 };
 use pkl_syntax::span::Span;
-use pkl_syntax::SyntaxToken;
+use pkl_syntax::{SyntaxDiagnostic, SyntaxToken};
 
 use pkl_stdlib::{self, render_type_signature, StdlibType};
 
@@ -52,6 +52,7 @@ pub struct Resolution {
     /// present, else the path stem). The module graph turns these into
     /// resolved URIs once the loader is available.
     pub imports: HashMap<String, ImportInfo>,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
 }
 
 /// Raw information about one `import "..." [as alias]` clause.
@@ -72,6 +73,8 @@ pub fn resolve_module(module: &Module) -> Resolution {
         scopes: ScopeArena::new(),
         references: Vec::new(),
         imports: HashMap::new(),
+        diagnostics: Vec::new(),
+        suppress_unknown_diagnostics: 0,
     };
     let module_scope = r.scopes.alloc(None);
     r.seed_stdlib(module_scope);
@@ -94,6 +97,7 @@ pub fn resolve_module(module: &Module) -> Resolution {
         references: r.references,
         by_span_start,
         imports: r.imports,
+        diagnostics: r.diagnostics,
     }
 }
 
@@ -102,6 +106,8 @@ struct Resolver {
     scopes: ScopeArena,
     references: Vec<Reference>,
     imports: HashMap<String, ImportInfo>,
+    diagnostics: Vec<SyntaxDiagnostic>,
+    suppress_unknown_diagnostics: u32,
 }
 
 impl Resolver {
@@ -115,6 +121,19 @@ impl Resolver {
     fn resolve_ident_in_scope(&mut self, scope: ScopeId, name: &str, span: Span) {
         if let Some(sym) = self.scopes.lookup(scope, name) {
             self.record_reference(span, sym);
+        } else if self.suppress_unknown_diagnostics == 0 {
+            let suggestion = closest_name(name, self.scopes.visible_names(scope));
+            let message = match suggestion {
+                Some(suggestion) => {
+                    format!(
+                        "unknown identifier `{}`; did you mean `{}`?",
+                        name, suggestion
+                    )
+                }
+                None => format!("unknown identifier `{}`", name),
+            };
+            self.diagnostics
+                .push(SyntaxDiagnostic::warning(span, message));
         }
     }
 
@@ -646,9 +665,11 @@ impl Resolver {
                 if let Some(inner) = c.inner() {
                     self.resolve_type(&inner, scope);
                 }
+                self.suppress_unknown_diagnostics += 1;
                 for constraint in c.constraints() {
                     self.resolve_expr(&constraint, scope);
                 }
+                self.suppress_unknown_diagnostics -= 1;
             }
             Type::Default(d) => {
                 if let Some(inner) = d.inner() {
@@ -1106,6 +1127,36 @@ fn strip_string_quotes(raw: &str) -> String {
         .min(lead_hashes);
     s = &s[..s.len() - trim_trail];
     s.to_string()
+}
+
+fn closest_name(target: &str, candidates: Vec<&str>) -> Option<String> {
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in candidates {
+        let distance = edit_distance(target, candidate);
+        if distance > 2 {
+            continue;
+        }
+        if best.map(|(_, d)| distance < d).unwrap_or(true) {
+            best = Some((candidate, distance));
+        }
+    }
+    best.map(|(candidate, _)| candidate.to_string())
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 impl Resolution {

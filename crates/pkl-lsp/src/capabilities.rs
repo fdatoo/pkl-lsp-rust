@@ -27,6 +27,10 @@ pub fn server_capabilities() -> ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
         document_highlight_provider: Some(OneOf::Left(true)),
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),

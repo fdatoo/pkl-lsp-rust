@@ -23,6 +23,10 @@ pub struct InitOptions {
     /// Filesystem cache root for `package:` imports.
     #[serde(default, rename = "packageCache")]
     pub package_cache: Option<String>,
+    /// Optional evaluator command for on-save validation. Use `{file}` as
+    /// the placeholder for the saved document path.
+    #[serde(default, rename = "evalCommand")]
+    pub eval_command: Vec<String>,
 }
 
 impl InitOptions {
@@ -137,6 +141,7 @@ mod tests {
                 .collect(),
             module_paths: Vec::new(),
             package_cache: None,
+            eval_command: Vec::new(),
         };
         let cfg = opts.into_loader_config();
         assert_eq!(cfg.namespaces["envns"], PathBuf::from("/tmp/env"));

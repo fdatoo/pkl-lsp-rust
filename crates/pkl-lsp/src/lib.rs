@@ -13,6 +13,7 @@ pub mod formatting;
 pub mod goto;
 pub mod highlights;
 pub mod hover;
+pub mod import_paths;
 pub mod inlay_hints;
 pub mod references;
 pub mod rename;

@@ -698,6 +698,415 @@ async fn completion_on_member_and_top_level() {
 }
 
 #[tokio::test]
+async fn completion_after_relative_import_alias_lists_imported_members() {
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let util_path = dir.path().join("util.pkl");
+    std::fs::write(&util_path, "answer: Int = 42\nclass Widget {}\n").unwrap();
+    let main_path = dir.path().join("main.pkl");
+    let main_src = "import \"./util.pkl\" as util\nvalue = util.\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 1, "character": 13}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"answer"),
+        "expected imported property completion, got {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"Widget"),
+        "expected imported class completion, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"class"),
+        "top-level completion leaked through, got {:?}",
+        labels
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_after_namespace_import_alias_lists_imported_members() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    let ns_file = ns_dir.path().join("config.pkl");
+    std::fs::write(&ns_file, "remotePort: Int = 8080\n").unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:config.pkl\" as cfg\nx = cfg.\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 1, "character": 8}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"remotePort"),
+        "expected namespace-imported property completion, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"class"),
+        "top-level completion leaked through, got {:?}",
+        labels
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_typed_object_body_lists_expected_members() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+    let src = "class Server {\n  host: String\n  port: Int\n}\nserver: Server {\n  \n}\n";
+    open_doc(
+        &mut writer,
+        &mut client_from_server,
+        "file:///tmp/object-body.pkl",
+        src,
+    )
+    .await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/object-body.pkl"},
+                "position": {"line": 5, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"host"), "expected host, got {:?}", labels);
+    assert!(labels.contains(&"port"), "expected port, got {:?}", labels);
+    assert!(
+        !labels.contains(&"class"),
+        "top-level completion leaked through, got {:?}",
+        labels
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_imported_new_object_body_lists_imported_class_members() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    let ns_file = ns_dir.path().join("automations.pkl");
+    std::fs::write(
+        &ns_file,
+        "class EventTrigger {\n  kind: String\n  enabled: Boolean\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src =
+        "import \"switchyard:automations\" as auto\ntrigger = new auto.EventTrigger {\n  \n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 2, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"kind"), "expected kind, got {:?}", labels);
+    assert!(
+        labels.contains(&"enabled"),
+        "expected enabled, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"class"),
+        "top-level completion leaked through, got {:?}",
+        labels
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_namespace_import_lists_namespace_files() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(ns_dir.path().join("config.pkl"), "x = 1\n").unwrap();
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(
+        &mut writer,
+        &mut client_from_server,
+        "file:///tmp/ns-import.pkl",
+        "import \"switchyard:\"\n",
+    )
+    .await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/ns-import.pkl"},
+                "position": {"line": 0, "character": 19}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"config"),
+        "expected namespace file completion, got {:?}",
+        labels
+    );
+    let item = items.iter().find(|i| i["label"] == "config").unwrap();
+    assert_eq!(item["insertText"], "config");
+    assert_eq!(item["filterText"], "config");
+    assert_eq!(item["textEdit"]["newText"], "switchyard:config");
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 8);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 19);
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn import_string_navigation_and_document_link_target_imported_file() {
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let util_path = dir.path().join("util.pkl");
+    std::fs::write(&util_path, "answer = 42\n").unwrap();
+    let main_path = dir.path().join("main.pkl");
+    let main_src = "import \"./util.pkl\" as util\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 0, "character": 10}
+            }
+        }),
+    )
+    .await;
+    let def = read_message(&mut client_from_server).await;
+    assert!(
+        def["result"]["uri"].as_str().unwrap().contains("util.pkl"),
+        "expected definition target util.pkl, got {:?}",
+        def
+    );
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/documentLink",
+            "params": {
+                "textDocument": {"uri": main_uri}
+            }
+        }),
+    )
+    .await;
+    let links = read_message(&mut client_from_server).await;
+    let result = links["result"].as_array().expect("document links");
+    assert_eq!(result.len(), 1, "expected one import link, got {:?}", links);
+    assert!(
+        result[0]["target"].as_str().unwrap().contains("util.pkl"),
+        "expected link target util.pkl, got {:?}",
+        links
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
 async fn rename_class_propagates_across_imports() {
     use tempfile::tempdir;
 
@@ -1139,18 +1548,18 @@ async fn completion_inside_import_string_offers_workspace_files() {
 
     let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
     assert!(
-        labels.contains(&"sibling.pkl"),
-        "expected sibling.pkl in {:?}",
+        labels.contains(&"sibling"),
+        "expected sibling in {:?}",
         labels
     );
 
-    // Verify `sibling.pkl` carries the correct text_edit and filter_text.
+    // Verify `sibling` carries the correct text_edit and filter_text.
     let sibling_item = items
         .iter()
-        .find(|i| i["label"] == "sibling.pkl")
+        .find(|i| i["label"] == "sibling")
         .expect("sibling completion item");
-    assert_eq!(sibling_item["filterText"], "sibling.pkl");
-    assert_eq!(sibling_item["textEdit"]["newText"], "sibling.pkl");
+    assert_eq!(sibling_item["filterText"], "sibling");
+    assert_eq!(sibling_item["textEdit"]["newText"], "sibling");
     // Replace from inside the opening quote (column 8) to current cursor (11).
     assert_eq!(sibling_item["textEdit"]["range"]["start"]["character"], 8);
     assert_eq!(sibling_item["textEdit"]["range"]["end"]["character"], 11);
@@ -1248,10 +1657,10 @@ async fn completion_at_empty_import_string_lists_all_candidates() {
     let resp = read_message(&mut client_from_server).await;
     let items = resp["result"].as_array().expect("array result");
     let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-    // alpha.pkl and beta.pkl from the workspace scan plus `pkl:`
+    // Extensionless alpha and beta from the workspace scan plus `pkl:`
     // modules as fallback.
-    assert!(labels.contains(&"alpha.pkl"), "got {:?}", labels);
-    assert!(labels.contains(&"beta.pkl"), "got {:?}", labels);
+    assert!(labels.contains(&"alpha"), "got {:?}", labels);
+    assert!(labels.contains(&"beta"), "got {:?}", labels);
     assert!(
         labels.iter().any(|l| l.starts_with("pkl:")),
         "expected pkl: modules in fallback, got {:?}",
@@ -1331,19 +1740,22 @@ async fn completion_inside_pkl_import_unchanged() {
     let resp = read_message(&mut client_from_server).await;
     let items = resp["result"].as_array().expect("array result");
     let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
-    // Every item is a `pkl:` module; none carry a textEdit (the legacy
-    // branch leaves replacement up to the editor's word-completion).
+    // Every item is a `pkl:` module and carries a replacement edit so
+    // partially typed prefixes are overwritten instead of appended to.
     assert!(!labels.is_empty(), "expected pkl: modules");
     assert!(
         labels.iter().all(|l| l.starts_with("pkl:")),
         "expected only pkl: items, got {:?}",
         labels
     );
-    assert!(
-        items.iter().all(|i| i.get("textEdit").is_none()),
-        "expected no textEdit on stdlib branch, got {:?}",
-        items
-    );
+    assert!(items.iter().all(|i| i.get("textEdit").is_some()));
+    let first = &items[0];
+    assert_eq!(first["textEdit"]["range"]["start"]["character"], 8);
+    assert_eq!(first["textEdit"]["range"]["end"]["character"], 12);
+    assert!(first["textEdit"]["newText"]
+        .as_str()
+        .unwrap()
+        .starts_with("pkl:"));
 
     send(
         &mut writer,

@@ -23,4 +23,12 @@ impl SyntaxDiagnostic {
             message: message.into(),
         }
     }
+
+    pub fn warning(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            span,
+            severity: Severity::Warning,
+            message: message.into(),
+        }
+    }
 }

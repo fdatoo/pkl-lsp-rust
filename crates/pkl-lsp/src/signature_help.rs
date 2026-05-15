@@ -4,19 +4,24 @@
 //! callee's signature. The active parameter is derived from the count of
 //! top-level commas between the opening paren and the cursor.
 
-use pkl_analyze::SymbolKind;
+use pkl_analyze::{ModuleGraph, SymbolKind};
 use pkl_syntax::cst::{
     self, ident_text, significant_span, token_span, AstNode, ClassMember, Expr, Item, MethodDecl,
     ObjectBody, ObjectMember, PropertyDecl, PropertyValue,
 };
 use tower_lsp::lsp_types::{
     Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, Position,
-    SignatureHelp, SignatureInformation,
+    SignatureHelp, SignatureInformation, Url,
 };
 
 use crate::document::Document;
 
-pub fn signature_help_at(doc: &Document, position: Position) -> Option<SignatureHelp> {
+pub fn signature_help_at(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    position: Position,
+) -> Option<SignatureHelp> {
     let offset = doc.position_to_offset(position);
     let module = doc.module();
     let mut best: Option<Expr> = None;
@@ -31,7 +36,7 @@ pub fn signature_help_at(doc: &Document, position: Position) -> Option<Signature
     let args = call.args();
     let span = significant_span(call.syntax());
 
-    let (signature, doc_text) = describe_callee(doc, &callee)?;
+    let (signature, doc_text) = describe_callee(doc, graph, uri, &callee)?;
     let mut info = SignatureInformation {
         label: signature.clone(),
         documentation: doc_text.map(|d| {
@@ -312,7 +317,12 @@ fn walk_expr(expr: &Expr, offset: u32, best: &mut Option<Expr>) {
     }
 }
 
-fn describe_callee(doc: &Document, callee: &Expr) -> Option<(String, Option<String>)> {
+fn describe_callee(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    callee: &Expr,
+) -> Option<(String, Option<String>)> {
     // 1. Member call: `expr.method(...)` — consult the inference's MemberRef.
     if let Expr::Member(m) = callee {
         if let Some(name_tok) = m.name() {
@@ -325,6 +335,15 @@ fn describe_callee(doc: &Document, callee: &Expr) -> Option<(String, Option<Stri
                     let sym = doc.analysis.resolution.symbol(user_id);
                     let sig = sym.signature.clone().unwrap_or_else(|| sym.name.clone());
                     return Some((sig, sym.doc.clone()));
+                }
+                if let Some(imported) = imported_callee_signature(
+                    doc,
+                    graph,
+                    uri,
+                    member.receiver_span.start,
+                    &member.member_name,
+                ) {
+                    return Some(imported);
                 }
             }
         }
@@ -353,6 +372,31 @@ fn describe_callee(doc: &Document, callee: &Expr) -> Option<(String, Option<Stri
     let _ = ident_text;
 
     None
+}
+
+fn imported_callee_signature(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    receiver_start: u32,
+    member_name: &str,
+) -> Option<(String, Option<String>)> {
+    let receiver_sym_id = doc.analysis.resolution.by_span_start.get(&receiver_start)?;
+    let receiver_sym = doc.analysis.resolution.symbol(*receiver_sym_id);
+    if !matches!(receiver_sym.kind, SymbolKind::Import { .. }) {
+        return None;
+    }
+    let module_uri = crate::uri::url_to_module_uri(uri);
+    let imported = graph.imported_module(&module_uri, &receiver_sym.name)?;
+    let sym = graph.lookup_top_level(imported, member_name)?;
+    if !matches!(sym.kind, SymbolKind::Method) {
+        return None;
+    }
+    let sig = sym
+        .signature
+        .clone()
+        .unwrap_or_else(|| format!("{}(...)", sym.name));
+    Some((sig, sym.doc.clone()))
 }
 
 /// Split a signature string into its parameter-label ranges so editors
@@ -407,6 +451,7 @@ fn extract_parameters(signature: &str) -> Option<Vec<ParameterInformation>> {
 mod tests {
     use super::*;
     use crate::document::Document;
+    use pkl_analyze::{FsLoader, FsLoaderConfig};
 
     #[test]
     fn active_parameter_counts_from_argument_list() {
@@ -419,7 +464,9 @@ description = render(endpointHost, 443)\n";
             character: "description = render(endpointHost, 4".len() as u32,
         };
 
-        let help = signature_help_at(&doc, position).expect("signature help");
+        let graph = ModuleGraph::new(FsLoader::with_stdlib(FsLoaderConfig::default()));
+        let uri = Url::parse("file:///tmp/signature.pkl").unwrap();
+        let help = signature_help_at(&doc, &graph, &uri, position).expect("signature help");
 
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.signatures[0].active_parameter, Some(1));

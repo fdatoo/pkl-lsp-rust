@@ -53,6 +53,10 @@ pub struct Backend {
     /// `root_uri` / `workspace_folders`. Kept up to date via
     /// `did_open` and `did_change_watched_files` hooks.
     pub workspace_index: Arc<RwLock<WorkspaceIndex>>,
+    /// Loader-facing configuration retained for editor features that need
+    /// to suggest import paths before the graph has loaded a target.
+    pub loader_config: Arc<RwLock<FsLoaderConfig>>,
+    pub eval_command: Arc<RwLock<Vec<String>>>,
     /// Set after `initialize` when the client advertises
     /// `window.workDoneProgress`. Servers must not create progress
     /// tokens without that capability.
@@ -67,6 +71,8 @@ impl Backend {
             documents: DashMap::new(),
             graph: Arc::new(RwLock::new(ModuleGraph::new(loader))),
             workspace_index: Arc::new(RwLock::new(WorkspaceIndex::empty())),
+            loader_config: Arc::new(RwLock::new(FsLoaderConfig::default())),
+            eval_command: Arc::new(RwLock::new(Vec::new())),
             supports_work_done_progress: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -74,7 +80,7 @@ impl Backend {
     /// Re-issue diagnostics for the given URL. Pulls local parser/analyzer
     /// diagnostics plus any import-resolution errors surfaced by the module
     /// graph.
-    async fn publish_diagnostics(&self, uri: &Url) {
+    async fn publish_diagnostics(&self, uri: &Url, run_eval: bool) {
         let Some(doc) = self.documents.get(uri) else {
             return;
         };
@@ -165,9 +171,67 @@ impl Backend {
         }
         drop(graph);
         drop(doc);
+        if run_eval {
+            if let Some(eval_diag) = self.eval_diagnostic(uri).await {
+                diags.push(eval_diag);
+            }
+        }
         self.client
             .publish_diagnostics(uri.clone(), diags, version)
             .await;
+    }
+
+    async fn eval_diagnostic(&self, uri: &Url) -> Option<Diagnostic> {
+        let command = self.eval_command.read().await.clone();
+        if command.is_empty() {
+            return None;
+        }
+        let path = uri.to_file_path().ok()?;
+        let path_text = path.to_string_lossy().to_string();
+        let program = command[0].clone();
+        let args: Vec<String> = command[1..]
+            .iter()
+            .map(|arg| arg.replace("{file}", &path_text))
+            .collect();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(program).args(args).output()
+        })
+        .await
+        .ok()?;
+        match output {
+            Ok(output) if output.status.success() => None,
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let message = if stderr.is_empty() { stdout } else { stderr };
+                Some(Diagnostic {
+                    range: Range::default(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("pkl eval".to_string()),
+                    message: if message.is_empty() {
+                        "evaluator command failed".to_string()
+                    } else {
+                        message
+                    },
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                })
+            }
+            Err(err) => Some(Diagnostic {
+                range: Range::default(),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("pkl eval".to_string()),
+                message: format!("evaluator command failed to start: {}", err),
+                related_information: None,
+                tags: None,
+                data: None,
+            }),
+        }
     }
 
     fn upsert_into_graph_blocking(graph: &mut ModuleGraph, uri: &Url, text: &str) {
@@ -261,8 +325,11 @@ impl LanguageServer for Backend {
         let roots = workspace_roots_from_params(&params);
 
         let opts = InitOptions::parse(params.initialization_options);
+        let eval_command = opts.eval_command.clone();
         let cfg = opts.into_loader_config();
-        let loader = FsLoader::with_stdlib(cfg);
+        let loader = FsLoader::with_stdlib(cfg.clone());
+        *self.loader_config.write().await = cfg;
+        *self.eval_command.write().await = eval_command;
         self.graph.write().await.set_loader(loader);
 
         let supports_progress = params
@@ -321,7 +388,7 @@ impl LanguageServer for Backend {
         if progress_started {
             self.end_progress(&token).await;
         }
-        self.publish_diagnostics(&uri).await;
+        self.publish_diagnostics(&uri, false).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -343,11 +410,12 @@ impl LanguageServer for Backend {
             let mut g = self.graph.write().await;
             Self::upsert_into_graph_blocking(&mut g, &uri, &text);
         }
-        self.publish_diagnostics(&uri).await;
+        self.publish_diagnostics(&uri, false).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.publish_diagnostics(&params.text_document.uri).await;
+        self.publish_diagnostics(&params.text_document.uri, true)
+            .await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -469,6 +537,21 @@ impl LanguageServer for Backend {
         Ok(highlights_at(&doc, position))
     }
 
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri;
+        let Some(doc) = self.documents.get(&uri) else {
+            return Ok(None);
+        };
+        let module_uri = url_to_module_uri(&uri);
+        let graph = self.graph.read().await;
+        let links = crate::import_paths::document_import_links(&doc, |local_name| {
+            graph
+                .imported_module(&module_uri, local_name)
+                .and_then(|entry| crate::uri::module_uri_to_url(&entry.uri))
+        });
+        Ok(Some(links))
+    }
+
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri;
         let Some(doc) = self.documents.get(&uri) else {
@@ -521,7 +604,8 @@ impl LanguageServer for Backend {
         let Some(doc) = self.documents.get(&uri) else {
             return Ok(None);
         };
-        Ok(signature_help_at(&doc, position))
+        let graph = self.graph.read().await;
+        Ok(signature_help_at(&doc, &graph, &uri, position))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
@@ -530,7 +614,14 @@ impl LanguageServer for Backend {
         let Some(doc) = self.documents.get(&uri) else {
             return Ok(None);
         };
-        Ok(code_actions_at(&uri, &doc, range))
+        let graph = self.graph.read().await;
+        Ok(code_actions_at(
+            &uri,
+            &doc,
+            &graph,
+            range,
+            &params.context.diagnostics,
+        ))
     }
 
     async fn symbol(
@@ -549,7 +640,15 @@ impl LanguageServer for Backend {
         };
         let graph = self.graph.read().await;
         let workspace_index = self.workspace_index.read().await;
-        Ok(complete_at(&doc, &graph, &workspace_index, &uri, position))
+        let loader_config = self.loader_config.read().await;
+        Ok(complete_at(
+            &doc,
+            &graph,
+            &workspace_index,
+            &loader_config,
+            &uri,
+            position,
+        ))
     }
 
     async fn goto_definition(

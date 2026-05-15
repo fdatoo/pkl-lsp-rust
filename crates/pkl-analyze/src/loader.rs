@@ -301,7 +301,7 @@ impl FsLoader {
             .ok_or_else(|| LoadError::UnsupportedScheme(format!("package:{}", rest)))?;
         // Trim leading slashes / `//` separators so we always join cleanly.
         let trimmed = rest.trim_start_matches('/');
-        Ok(cache.join(trimmed))
+        Ok(resolve_module_candidate(cache.join(trimmed)))
     }
 
     /// Resolve a `modulepath:` import against the configured search roots
@@ -314,14 +314,16 @@ impl FsLoader {
         }
         let trimmed = rest.trim_start_matches('/');
         for root in &self.config.module_paths {
-            let candidate = root.join(trimmed);
+            let candidate = resolve_module_candidate(root.join(trimmed));
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
         // No hit on disk — return the first-root path as a stable
         // placeholder.
-        Ok(self.config.module_paths[0].join(trimmed))
+        Ok(resolve_module_candidate(
+            self.config.module_paths[0].join(trimmed),
+        ))
     }
 
     fn resolve_namespace_path(&self, prefix: &str, rest: &str) -> Result<PathBuf, LoadError> {
@@ -393,7 +395,7 @@ impl FsLoader {
         // 4. Absolute filesystem path.
         let path = Path::new(raw_trimmed);
         if path.is_absolute() {
-            return Ok(path.to_path_buf());
+            return Ok(resolve_module_candidate(path.to_path_buf()));
         }
 
         // 5. Relative path — resolve against the importer's directory.
@@ -402,7 +404,7 @@ impl FsLoader {
                 let base = uri_to_path(from_uri)
                     .ok_or_else(|| LoadError::Malformed(format!("importer uri: {}", from_uri)))?;
                 let base_dir = base.parent().unwrap_or(Path::new(""));
-                Ok(base_dir.join(raw_trimmed))
+                Ok(resolve_module_candidate(base_dir.join(raw_trimmed)))
             }
             None => Err(LoadError::Malformed(format!(
                 "cannot resolve relative import `{}` without an importer URI",
@@ -481,6 +483,17 @@ fn push_module_candidate(out: &mut Vec<PathBuf>, path: PathBuf) {
     if !has_extension {
         out.push(path.with_extension("pkl"));
     }
+}
+
+fn resolve_module_candidate(path: PathBuf) -> PathBuf {
+    let mut candidates = Vec::with_capacity(2);
+    push_module_candidate(&mut candidates, path);
+    candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+        .unwrap_or_default()
 }
 
 fn expand_env(input: &str) -> String {
@@ -687,6 +700,20 @@ mod tests {
         let loader = FsLoader::new(FsLoaderConfig::default());
         let p = loader.resolve_path("./util.pkl", Some(importer)).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/project/./util.pkl"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn extensionless_relative_path_resolves_to_pkl_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.pkl");
+        let util = dir.path().join("util.pkl");
+        fs::write(&main, "").unwrap();
+        fs::write(&util, "").unwrap();
+        let importer = path_to_uri(&main);
+        let loader = FsLoader::new(FsLoaderConfig::default());
+        let p = loader.resolve_path("./util", Some(&importer)).unwrap();
+        assert_eq!(p, util);
     }
 
     #[test]

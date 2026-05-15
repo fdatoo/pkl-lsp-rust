@@ -14,6 +14,18 @@ pub fn definition_at(
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
     let offset = doc.position_to_offset(position);
+    let module_uri = url_to_module_uri(uri);
+
+    if let Some(target_url) = crate::import_paths::import_target_at(doc, offset, |local_name| {
+        graph
+            .imported_module(&module_uri, local_name)
+            .and_then(|entry| module_uri_to_url(&entry.uri))
+    }) {
+        return Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_url,
+            range: Range::default(),
+        }));
+    }
 
     // 1. Member access — try cross-file first, then user-class members.
     if let Some(member) = doc.analysis.inference.member_ref_touching(offset) {
@@ -25,7 +37,6 @@ pub fn definition_at(
         {
             let receiver_sym = doc.analysis.resolution.symbol(receiver_sym_id);
             if matches!(receiver_sym.kind, pkl_analyze::SymbolKind::Import { .. }) {
-                let module_uri = url_to_module_uri(uri);
                 if let Some(imported) = graph.imported_module(&module_uri, &receiver_sym.name) {
                     if let Some(sym) = graph.lookup_top_level(imported, &member.member_name) {
                         if let Some(target_url) = module_uri_to_url(&imported.uri) {
@@ -59,7 +70,6 @@ pub fn definition_at(
 
     // Import alias: jump into the imported file.
     if let pkl_analyze::SymbolKind::Import { .. } = symbol.kind {
-        let module_uri = url_to_module_uri(uri);
         if let Some(imported) = graph.imported_module(&module_uri, &symbol.name) {
             if let Some(target_url) = module_uri_to_url(&imported.uri) {
                 return Some(GotoDefinitionResponse::Scalar(Location {

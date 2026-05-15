@@ -68,4 +68,15 @@ impl ScopeArena {
     pub fn parent_of(&self, scope: ScopeId) -> Option<ScopeId> {
         self.scopes[scope.index()].parent
     }
+
+    pub fn visible_names(&self, scope: ScopeId) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut cur = Some(scope);
+        while let Some(id) = cur {
+            let s = &self.scopes[id.index()];
+            out.extend(s.bindings.keys().map(String::as_str));
+            cur = s.parent;
+        }
+        out
+    }
 }

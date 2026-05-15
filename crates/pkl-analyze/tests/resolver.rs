@@ -170,6 +170,17 @@ fn unresolved_identifier_is_not_recorded() {
 }
 
 #[test]
+fn constrained_type_shorthand_member_is_not_unknown_identifier() {
+    let src = "name: String(!isEmpty) = \"alice\"";
+    let r = resolve(src);
+    assert!(
+        r.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        r.diagnostics
+    );
+}
+
+#[test]
 fn ident_inside_string_interpolation_resolves_to_property() {
     // The `name` identifier inside `"hi \(name)"` should resolve to the
     // property declaration on the line above.

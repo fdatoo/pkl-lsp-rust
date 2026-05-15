@@ -140,6 +140,20 @@ export PKL_LSP_PACKAGE_CACHE="$HOME/.pkl/cache"
 export PKL_LSP_MODULE_PATHS="$HOME/work/config/pkl:/etc/pkl"
 ```
 
+### Optional evaluator diagnostics
+
+For projects that want evaluator-backed validation on save, pass an
+explicit command through `initializationOptions.evalCommand`. The server
+does not assume a `pkl` CLI shape; it runs the configured command with
+`{file}` replaced by the saved document path and reports non-zero exits as
+diagnostics.
+
+```json
+{
+  "evalCommand": ["pkl", "eval", "{file}"]
+}
+```
+
 ## Known limitations
 
 This is a v1 language server, not a full reimplementation of the Pkl

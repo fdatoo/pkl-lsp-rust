@@ -6,18 +6,25 @@
 
 use std::collections::HashMap;
 
-use pkl_analyze::Ty;
+use pkl_analyze::{ModuleGraph, Ty};
 use pkl_syntax::cst::{
     self, ident_text, significant_span, token_span, AstNode, ClassMember, Item, PropertyValue,
 };
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionResponse, Range, TextEdit, Url,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionResponse, Diagnostic, Position,
+    Range, TextEdit, Url, WorkspaceEdit,
 };
 
 use crate::document::Document;
+use crate::uri::{module_uri_to_url, url_to_module_uri};
 
-pub fn code_actions_at(uri: &Url, doc: &Document, range: Range) -> Option<CodeActionResponse> {
+pub fn code_actions_at(
+    uri: &Url,
+    doc: &Document,
+    graph: &ModuleGraph,
+    range: Range,
+    diagnostics: &[Diagnostic],
+) -> Option<CodeActionResponse> {
     let mut out: Vec<CodeActionOrCommand> = Vec::new();
     let start = doc.position_to_offset(range.start);
     let end = doc.position_to_offset(range.end);
@@ -36,6 +43,8 @@ pub fn code_actions_at(uri: &Url, doc: &Document, range: Range) -> Option<CodeAc
             }
         }
     }
+    collect_create_property_actions(uri, diagnostics, &mut out);
+    collect_imported_member_actions(uri, graph, diagnostics, &mut out);
 
     if out.is_empty() {
         None
@@ -97,6 +106,117 @@ fn collect_property_action(
         disabled: None,
         data: None,
     }));
+}
+
+fn collect_create_property_actions(
+    uri: &Url,
+    diagnostics: &[Diagnostic],
+    out: &mut Vec<CodeActionOrCommand>,
+) {
+    for diagnostic in diagnostics {
+        let Some(name) = diagnostic
+            .message
+            .strip_prefix("unknown identifier `")
+            .and_then(|rest| rest.split_once('`').map(|(name, _)| name))
+        else {
+            continue;
+        };
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 0),
+                },
+                new_text: format!("{} = null\n", name),
+            }],
+        );
+        out.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Create property `{}`", name),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diagnostic.clone()]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            command: None,
+            is_preferred: Some(false),
+            disabled: None,
+            data: None,
+        }));
+    }
+}
+
+fn collect_imported_member_actions(
+    uri: &Url,
+    graph: &ModuleGraph,
+    diagnostics: &[Diagnostic],
+    out: &mut Vec<CodeActionOrCommand>,
+) {
+    let module_uri = url_to_module_uri(uri);
+    for diagnostic in diagnostics {
+        let Some((member_name, alias)) = parse_missing_imported_member(&diagnostic.message) else {
+            continue;
+        };
+        let Some(imported) = graph.imported_module(&module_uri, alias) else {
+            continue;
+        };
+        let Some(target_url) = module_uri_to_url(&imported.uri) else {
+            continue;
+        };
+        let end = end_position(&imported.source);
+        let prefix = if imported.source.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(
+            target_url.clone(),
+            vec![TextEdit {
+                range: Range { start: end, end },
+                new_text: format!("{}{} = null\n", prefix, member_name),
+            }],
+        );
+        out.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Create `{}` in imported module `{}`", member_name, alias),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diagnostic.clone()]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            command: None,
+            is_preferred: Some(false),
+            disabled: None,
+            data: None,
+        }));
+    }
+}
+
+fn parse_missing_imported_member(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("no member `")?;
+    let (member_name, rest) = rest.split_once('`')?;
+    let rest = rest.strip_prefix(" in imported module `")?;
+    let (alias, _) = rest.split_once('`')?;
+    Some((member_name, alias))
+}
+
+fn end_position(source: &str) -> Position {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for c in source.chars() {
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += c.len_utf16() as u32;
+        }
+    }
+    Position::new(line, col)
 }
 
 fn collect_class_property_action(
