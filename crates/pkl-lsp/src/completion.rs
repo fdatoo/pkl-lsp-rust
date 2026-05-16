@@ -19,42 +19,181 @@ use pkl_stdlib::MemberKind;
 use pkl_syntax::cst::{self, AstNode, Expr, Item, ObjectMember, PropertyValue};
 use tower_lsp::lsp_types::*;
 
+use crate::config::CompletionConfig;
 use crate::document::Document;
 
-const KEYWORDS: &[&str] = &[
-    "abstract",
-    "amends",
-    "as",
-    "class",
-    "else",
-    "extends",
-    "external",
-    "false",
-    "fixed",
-    "for",
-    "function",
-    "hidden",
-    "if",
-    "import",
-    "in",
-    "is",
-    "let",
-    "local",
-    "module",
-    "new",
-    "null",
-    "open",
-    "out",
-    "outer",
-    "read",
-    "super",
-    "this",
-    "throw",
-    "trace",
-    "true",
-    "typealias",
-    "unknown",
-    "when",
+struct KeywordSpec {
+    label: &'static str,
+    detail: &'static str,
+    insert_text: Option<&'static str>,
+}
+
+const KEYWORDS: &[KeywordSpec] = &[
+    KeywordSpec {
+        label: "abstract",
+        detail: "Declare an abstract class member",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "amends",
+        detail: "Amend another module",
+        insert_text: Some("amends \"${1:module}\"\n\n${0}"),
+    },
+    KeywordSpec {
+        label: "as",
+        detail: "Name an import alias",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "class",
+        detail: "Declare a class",
+        insert_text: Some("class ${1:Name} {\n  ${0}\n}"),
+    },
+    KeywordSpec {
+        label: "else",
+        detail: "Else branch for if/when",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "extends",
+        detail: "Extend a module or class",
+        insert_text: Some("extends \"${1:module}\"\n\n${0}"),
+    },
+    KeywordSpec {
+        label: "external",
+        detail: "Declare an external member",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "false",
+        detail: "Boolean false",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "fixed",
+        detail: "Prevent overrides",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "for",
+        detail: "Generate entries from a collection",
+        insert_text: Some("for (${1:item} in ${2:items}) {\n  ${0}\n}"),
+    },
+    KeywordSpec {
+        label: "function",
+        detail: "Declare a function",
+        insert_text: Some("function ${1:name}(${2}) = ${0}"),
+    },
+    KeywordSpec {
+        label: "hidden",
+        detail: "Hide a member from output",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "if",
+        detail: "Conditional expression",
+        insert_text: Some("if (${1:condition}) ${2:value} else ${0}"),
+    },
+    KeywordSpec {
+        label: "import",
+        detail: "Import another module",
+        insert_text: Some("import \"${1:module}\" as ${2:name}"),
+    },
+    KeywordSpec {
+        label: "in",
+        detail: "For-generator separator",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "is",
+        detail: "Type check expression",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "let",
+        detail: "Local expression binding",
+        insert_text: Some("let (${1:name} = ${2:value}) ${0}"),
+    },
+    KeywordSpec {
+        label: "local",
+        detail: "Declare a local member",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "module",
+        detail: "Declare module metadata",
+        insert_text: Some("module ${1:name}\n\n${0}"),
+    },
+    KeywordSpec {
+        label: "new",
+        detail: "Create an object",
+        insert_text: Some("new ${1:Type} {\n  ${0}\n}"),
+    },
+    KeywordSpec {
+        label: "null",
+        detail: "Null value",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "open",
+        detail: "Allow object members to be extended",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "out",
+        detail: "Mark a type parameter covariant",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "outer",
+        detail: "Reference an outer object scope",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "read",
+        detail: "Read an external resource",
+        insert_text: Some("read(\"${1:path}\")"),
+    },
+    KeywordSpec {
+        label: "super",
+        detail: "Reference a superclass member",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "this",
+        detail: "Reference the current object",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "throw",
+        detail: "Throw an error",
+        insert_text: Some("throw(${1:message})"),
+    },
+    KeywordSpec {
+        label: "trace",
+        detail: "Trace a value while evaluating",
+        insert_text: Some("trace(${1:value})"),
+    },
+    KeywordSpec {
+        label: "true",
+        detail: "Boolean true",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "typealias",
+        detail: "Declare a type alias",
+        insert_text: Some("typealias ${1:Name} = ${0}"),
+    },
+    KeywordSpec {
+        label: "unknown",
+        detail: "Unknown type marker",
+        insert_text: None,
+    },
+    KeywordSpec {
+        label: "when",
+        detail: "Conditional object members",
+        insert_text: Some("when (${1:condition}) {\n  ${0}\n}"),
+    },
 ];
 
 pub fn complete_at(
@@ -62,6 +201,7 @@ pub fn complete_at(
     graph: &ModuleGraph,
     workspace_index: &WorkspaceIndex,
     loader_config: &FsLoaderConfig,
+    completion_config: &CompletionConfig,
     uri: &Url,
     position: Position,
 ) -> Option<CompletionResponse> {
@@ -80,7 +220,8 @@ pub fn complete_at(
             quote_start,
             offset as usize,
         ),
-        Context::TopLevel => object_body_completions(doc, graph, uri, offset)
+        Context::String => string_value_completions(doc, completion_config, offset),
+        Context::TopLevel => contextual_body_completions(doc, graph, uri, offset)
             .unwrap_or_else(|| top_level_completions(doc)),
     };
     Some(CompletionResponse::Array(items))
@@ -97,6 +238,7 @@ enum Context {
     ImportPath {
         quote_start: usize,
     },
+    String,
     TopLevel,
 }
 
@@ -108,6 +250,10 @@ fn detect_context(text: &str, offset: usize) -> Context {
     // Inside an import string?
     if let Some(quote_start) = is_inside_import_string(prefix) {
         return Context::ImportPath { quote_start };
+    }
+
+    if is_inside_string(text, offset) {
+        return Context::String;
     }
 
     // Member access: walk backwards past whitespace, looking for `.` or `?.`
@@ -154,6 +300,249 @@ fn is_inside_import_string(prefix: &[u8]) -> Option<usize> {
     last_quote
 }
 
+fn is_inside_string(text: &str, offset: usize) -> bool {
+    let offset = offset as u32;
+    for token in pkl_syntax::tokenize(text) {
+        match token.kind {
+            pkl_syntax::SyntaxKind::String | pkl_syntax::SyntaxKind::MultilineString => {
+                if token.span.start < offset && offset < token.span.end {
+                    return true;
+                }
+            }
+            pkl_syntax::SyntaxKind::StringPart | pkl_syntax::SyntaxKind::MultilineStringPart => {
+                if token.span.touches(offset) {
+                    return true;
+                }
+            }
+            pkl_syntax::SyntaxKind::StringQuoteOpen => {
+                if token.span.end == offset {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+struct StringValueContext {
+    field_name: String,
+    replace_range: Range,
+}
+
+fn string_value_completions(
+    doc: &Document,
+    completion_config: &CompletionConfig,
+    offset: u32,
+) -> Vec<CompletionItem> {
+    let Some(ctx) = string_value_context(doc, offset) else {
+        return Vec::new();
+    };
+    let Some(values) = completion_config.values.get(&ctx.field_name) else {
+        return Vec::new();
+    };
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| CompletionItem {
+            label: value.label().to_string(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: value.detail().map(ToOwned::to_owned),
+            documentation: value.documentation(),
+            sort_text: Some(format!("0000_value_{idx:04}_{}", value.label())),
+            filter_text: Some(value.label().to_string()),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                range: ctx.replace_range,
+                new_text: value.label().to_string(),
+            })),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn string_value_context(doc: &Document, offset: u32) -> Option<StringValueContext> {
+    for item in doc.module().items() {
+        match item {
+            Item::Property(p) => {
+                let Some(name) = p.name().map(|t| pkl_syntax::cst::ident_text(&t)) else {
+                    continue;
+                };
+                if let Some(ctx) = property_string_value_context(doc, &name, p.value(), offset) {
+                    return Some(ctx);
+                }
+            }
+            Item::Method(m) => {
+                if let Some(body) = m.body() {
+                    if let Some(ctx) = expr_string_value_context(doc, &body, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn property_string_value_context(
+    doc: &Document,
+    name: &str,
+    value: Option<PropertyValue>,
+    offset: u32,
+) -> Option<StringValueContext> {
+    match value {
+        Some(PropertyValue::Expr(expr)) => literal_string_replace_range(doc, &expr, offset)
+            .map(|replace_range| StringValueContext {
+                field_name: name.to_string(),
+                replace_range,
+            })
+            .or_else(|| expr_string_value_context(doc, &expr, offset)),
+        Some(PropertyValue::ObjectBody(body)) => {
+            object_body_string_value_context(doc, &body, offset)
+        }
+        None => None,
+    }
+}
+
+fn object_body_string_value_context(
+    doc: &Document,
+    body: &cst::ObjectBody,
+    offset: u32,
+) -> Option<StringValueContext> {
+    let span = pkl_syntax::cst::significant_span(body.syntax());
+    if !span.contains(offset) {
+        return None;
+    }
+    for member in body.members() {
+        match member {
+            ObjectMember::Property(p) => {
+                let Some(name) = p.name().map(|t| pkl_syntax::cst::ident_text(&t)) else {
+                    continue;
+                };
+                if let Some(ctx) = property_string_value_context(doc, &name, p.value(), offset) {
+                    return Some(ctx);
+                }
+            }
+            ObjectMember::Element(e) => {
+                if let Some(expr) = e.expr() {
+                    if let Some(ctx) = expr_string_value_context(doc, &expr, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+            ObjectMember::Entry(e) => match e.value() {
+                Some(PropertyValue::ObjectBody(body)) => {
+                    if let Some(ctx) = object_body_string_value_context(doc, &body, offset) {
+                        return Some(ctx);
+                    }
+                }
+                Some(PropertyValue::Expr(expr)) => {
+                    if let Some(ctx) = expr_string_value_context(doc, &expr, offset) {
+                        return Some(ctx);
+                    }
+                }
+                None => {}
+            },
+            ObjectMember::When(w) => {
+                if let Some(body) = w.then_body() {
+                    if let Some(ctx) = object_body_string_value_context(doc, &body, offset) {
+                        return Some(ctx);
+                    }
+                }
+                if let Some(body) = w.else_body() {
+                    if let Some(ctx) = object_body_string_value_context(doc, &body, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+            ObjectMember::For(f) => {
+                if let Some(body) = f.body() {
+                    if let Some(ctx) = object_body_string_value_context(doc, &body, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+            ObjectMember::Method(m) => {
+                if let Some(expr) = m.body() {
+                    if let Some(ctx) = expr_string_value_context(doc, &expr, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+            ObjectMember::Spread(s) => {
+                if let Some(expr) = s.expr() {
+                    if let Some(ctx) = expr_string_value_context(doc, &expr, offset) {
+                        return Some(ctx);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn expr_string_value_context(
+    doc: &Document,
+    expr: &Expr,
+    offset: u32,
+) -> Option<StringValueContext> {
+    let span = pkl_syntax::cst::significant_span(expr.syntax());
+    if !span.contains(offset) {
+        return None;
+    }
+    match expr {
+        Expr::New(n) => n
+            .body()
+            .and_then(|body| object_body_string_value_context(doc, &body, offset)),
+        Expr::Amends(a) => a
+            .body()
+            .and_then(|body| object_body_string_value_context(doc, &body, offset)),
+        Expr::Paren(p) => p
+            .inner()
+            .and_then(|inner| expr_string_value_context(doc, &inner, offset)),
+        _ => None,
+    }
+}
+
+fn literal_string_replace_range(doc: &Document, expr: &Expr, offset: u32) -> Option<Range> {
+    let Expr::Literal(lit) = expr else {
+        return None;
+    };
+    if !matches!(
+        lit.kind(),
+        Some(cst::LiteralKind::String | cst::LiteralKind::MultilineString)
+    ) {
+        return None;
+    }
+    let token = lit.token()?;
+    let token_span = pkl_syntax::cst::token_span(&token);
+    let (content_start, content_end) =
+        string_literal_content_offsets(token.text(), token_span.start)?;
+    if !(content_start <= offset && offset <= content_end) {
+        return None;
+    }
+    Some(Range {
+        start: crate::document::byte_to_position(&doc.rope, content_start as usize),
+        end: crate::document::byte_to_position(&doc.rope, content_end as usize),
+    })
+}
+
+fn string_literal_content_offsets(text: &str, token_start: u32) -> Option<(u32, u32)> {
+    let hash_count = text.bytes().take_while(|b| *b == b'#').count();
+    let rest = &text[hash_count..];
+    let quote_count = if rest.starts_with("\"\"\"") { 3 } else { 1 };
+    let open_len = hash_count + quote_count;
+    let close_len = quote_count + hash_count;
+    if text.len() < open_len + close_len {
+        return None;
+    }
+    Some((
+        token_start + open_len as u32,
+        token_start + (text.len() - close_len) as u32,
+    ))
+}
+
 // ----------------------------------------------------------------------
 // Top-level completions: every user-defined symbol visible plus stdlib
 // types, top-level constructors, and Pkl keywords.
@@ -169,15 +558,7 @@ fn top_level_completions(doc: &Document) -> Vec<CompletionItem> {
         items.push(symbol_completion(sym));
     }
 
-    for kw in KEYWORDS {
-        items.push(CompletionItem {
-            label: kw.to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            ..Default::default()
-        });
-    }
-
-    items.extend(snippet_completions());
+    items.extend(keyword_completions(None));
 
     items
 }
@@ -209,26 +590,50 @@ fn symbol_completion(sym: &pkl_analyze::Symbol) -> CompletionItem {
     }
 }
 
-fn snippet_completions() -> Vec<CompletionItem> {
-    [
-        ("class", "class ${1:Name} {\n  ${0}\n}"),
-        ("function", "function ${1:name}(${2}) = ${0}"),
-        ("new", "new ${1:Type} {\n  ${0}\n}"),
-        ("amends", "amends \"${1:path.pkl}\"\n\n${0}"),
-        ("extends", "extends \"${1:path.pkl}\"\n\n${0}"),
-        ("import", "import \"${1:path.pkl}\" as ${2:name}"),
-        ("for", "for (${1:item} in ${2:items}) {\n  ${0}\n}"),
-        ("when", "when (${1:condition}) {\n  ${0}\n}"),
-    ]
-    .into_iter()
-    .map(|(label, insert_text)| CompletionItem {
-        label: label.to_string(),
+fn keyword_completions(replace_range: Option<Range>) -> Vec<CompletionItem> {
+    KEYWORDS
+        .iter()
+        .enumerate()
+        .map(|(idx, kw)| {
+            let insert = kw.insert_text.unwrap_or(kw.label).to_string();
+            CompletionItem {
+                label: kw.label.to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some(kw.detail.to_string()),
+                insert_text: Some(insert.clone()),
+                insert_text_format: kw.insert_text.map(|_| InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("9000_keyword_{idx:02}_{}", kw.label)),
+                text_edit: replace_range.map(|range| {
+                    CompletionTextEdit::Edit(TextEdit {
+                        range,
+                        new_text: insert.clone(),
+                    })
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn contextual_constructor_completion(
+    surface: &BodySurface,
+    replace_range: Range,
+    rank: usize,
+) -> CompletionItem {
+    let type_name = surface.type_name();
+    CompletionItem {
+        label: format!("new {}", type_name),
         kind: Some(CompletionItemKind::SNIPPET),
-        insert_text: Some(insert_text.to_string()),
+        detail: Some(format!("Create {}", type_name)),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
+        filter_text: Some(format!("new {}", type_name)),
+        sort_text: Some(format!("0000_constructor_{rank:04}_{type_name}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: replace_range,
+            new_text: format!("new {} {{\n  ${{0}}\n}}", type_name),
+        })),
         ..Default::default()
-    })
-    .collect()
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -330,6 +735,65 @@ enum BodySurface {
     ImportedClass { alias: String, class_name: String },
 }
 
+impl BodySurface {
+    fn type_name(&self) -> String {
+        match self {
+            BodySurface::Local(Ty::Named { name, .. }) => name.clone(),
+            BodySurface::Local(ty) => ty.to_string(),
+            BodySurface::ImportedClass { alias, class_name } => {
+                format!("{}.{}", alias, class_name)
+            }
+        }
+    }
+}
+
+fn contextual_body_completions(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    offset: u32,
+) -> Option<Vec<CompletionItem>> {
+    if constructor_prefix_intent(doc, offset) {
+        if let Some(items) = constructor_body_completions(doc, graph, uri, offset) {
+            return Some(items);
+        }
+    }
+
+    if let Some(items) = object_body_completions(doc, graph, uri, offset) {
+        return Some(items);
+    }
+
+    constructor_body_completions(doc, graph, uri, offset)
+}
+
+fn constructor_body_completions(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    offset: u32,
+) -> Option<Vec<CompletionItem>> {
+    let replace_range = current_prefix_replace_range(doc, offset);
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for surface in contextual_constructor_surfaces(doc, graph, uri, offset) {
+        let key = surface.type_name();
+        if !seen.insert(key) {
+            continue;
+        }
+        items.push(contextual_constructor_completion(
+            &surface,
+            replace_range,
+            items.len(),
+        ));
+    }
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
 fn object_body_completions(
     doc: &Document,
     graph: &ModuleGraph,
@@ -337,7 +801,7 @@ fn object_body_completions(
     offset: u32,
 ) -> Option<Vec<CompletionItem>> {
     let module = doc.module();
-    let mut best: Option<(u32, BodySurface)> = None;
+    let mut best: Option<(u32, BodySurface, std::collections::HashSet<String>)> = None;
     for item in module.items() {
         match item {
             Item::Property(p) => {
@@ -362,8 +826,8 @@ fn object_body_completions(
         }
     }
 
-    let (_, surface) = best?;
-    let items = body_surface_completions(doc, graph, uri, &surface);
+    let (_, surface, declared_names) = best?;
+    let items = body_surface_completions(doc, graph, uri, &surface, &declared_names);
     if items.is_empty() {
         None
     } else {
@@ -376,13 +840,14 @@ fn body_surface_completions(
     graph: &ModuleGraph,
     uri: &Url,
     surface: &BodySurface,
+    declared_names: &std::collections::HashSet<String>,
 ) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();
     match surface {
         BodySurface::Local(ty) => {
             for (m, owner) in stdlib_members_of(ty) {
-                if !seen.insert(m.name.to_string()) {
+                if declared_names.contains(m.name) || !seen.insert(m.name.to_string()) {
                     continue;
                 }
                 items.push(CompletionItem {
@@ -405,16 +870,19 @@ fn body_surface_completions(
             }
             for sym_id in user_members_of(&doc.analysis.resolution, ty) {
                 let sym = doc.analysis.resolution.symbol(sym_id);
-                if !seen.insert(sym.name.clone()) {
+                if declared_names.contains(&sym.name) || !seen.insert(sym.name.clone()) {
                     continue;
                 }
                 items.push(symbol_completion(sym));
             }
         }
         BodySurface::ImportedClass { alias, class_name } => {
-            items.extend(imported_class_member_completions(
-                graph, uri, alias, class_name,
-            ));
+            for item in imported_class_member_completions(graph, uri, alias, class_name) {
+                if declared_names.contains(&item.label) || !seen.insert(item.label.clone()) {
+                    continue;
+                }
+                items.push(item);
+            }
         }
     }
     items
@@ -427,7 +895,7 @@ fn inspect_property_value_for_body(
     value: Option<PropertyValue>,
     expected: Option<&BodySurface>,
     offset: u32,
-    best: &mut Option<(u32, BodySurface)>,
+    best: &mut Option<(u32, BodySurface, std::collections::HashSet<String>)>,
 ) {
     match value {
         Some(PropertyValue::ObjectBody(body)) => {
@@ -447,7 +915,7 @@ fn inspect_object_body(
     body: &cst::ObjectBody,
     expected: Option<&BodySurface>,
     offset: u32,
-    best: &mut Option<(u32, BodySurface)>,
+    best: &mut Option<(u32, BodySurface, std::collections::HashSet<String>)>,
 ) {
     let span = pkl_syntax::cst::significant_span(body.syntax());
     if !span.contains(offset) {
@@ -457,10 +925,14 @@ fn inspect_object_body(
         if !matches!(surface, BodySurface::Local(Ty::Unknown))
             && best
                 .as_ref()
-                .map(|(start, _)| span.start >= *start)
+                .map(|(start, _, _)| span.start >= *start)
                 .unwrap_or(true)
         {
-            *best = Some((span.start, surface.clone()));
+            *best = Some((
+                span.start,
+                surface.clone(),
+                declared_object_member_names(body),
+            ));
         }
     }
 
@@ -535,7 +1007,7 @@ fn inspect_expr_for_body(
     expr: &Expr,
     expected: Option<&BodySurface>,
     offset: u32,
-    best: &mut Option<(u32, BodySurface)>,
+    best: &mut Option<(u32, BodySurface, std::collections::HashSet<String>)>,
 ) {
     let span = pkl_syntax::cst::significant_span(expr.syntax());
     if !span.contains(offset) {
@@ -564,6 +1036,26 @@ fn inspect_expr_for_body(
         }
         _ => {}
     }
+}
+
+fn declared_object_member_names(body: &cst::ObjectBody) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for member in body.members() {
+        match member {
+            ObjectMember::Property(p) => {
+                if let Some(name) = p.name() {
+                    names.insert(pkl_syntax::cst::ident_text(&name));
+                }
+            }
+            ObjectMember::Method(m) => {
+                if let Some(name) = m.name() {
+                    names.insert(pkl_syntax::cst::ident_text(&name));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 fn body_surface_from_type(doc: &Document, ty: &cst::Type) -> BodySurface {
@@ -657,6 +1149,303 @@ fn imported_class_member_completions(
         .filter(|s| s.container == Some(class.id))
         .map(symbol_completion)
         .collect()
+}
+
+fn contextual_constructor_surfaces(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    offset: u32,
+) -> Vec<BodySurface> {
+    let mut best: Option<(u32, Vec<BodySurface>)> = None;
+    for item in doc.module().items() {
+        match item {
+            Item::Property(p) => {
+                let expected = p.ty().as_ref().map(|ty| body_surface_from_type(doc, ty));
+                collect_property_value_constructor_surfaces(
+                    doc,
+                    graph,
+                    uri,
+                    p.value(),
+                    expected.as_ref(),
+                    offset,
+                    &mut best,
+                );
+            }
+            Item::Method(m) => {
+                if let Some(body) = m.body() {
+                    collect_expr_constructor_surfaces(
+                        doc, graph, uri, &body, None, offset, &mut best,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    best.map(|(_, surfaces)| surfaces).unwrap_or_default()
+}
+
+fn collect_property_value_constructor_surfaces(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    value: Option<PropertyValue>,
+    expected: Option<&BodySurface>,
+    offset: u32,
+    best: &mut Option<(u32, Vec<BodySurface>)>,
+) {
+    match value {
+        Some(PropertyValue::ObjectBody(body)) => {
+            collect_object_body_constructor_surfaces(doc, graph, uri, &body, expected, offset, best)
+        }
+        Some(PropertyValue::Expr(expr)) => {
+            collect_expr_constructor_surfaces(doc, graph, uri, &expr, expected, offset, best)
+        }
+        None => {}
+    }
+}
+
+fn collect_object_body_constructor_surfaces(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    body: &cst::ObjectBody,
+    expected: Option<&BodySurface>,
+    offset: u32,
+    best: &mut Option<(u32, Vec<BodySurface>)>,
+) {
+    let span = pkl_syntax::cst::significant_span(body.syntax());
+    if !span.contains(offset) {
+        return;
+    }
+
+    let mut surfaces = Vec::new();
+    let mut prior_elements = Vec::new();
+    for member in body.members() {
+        if let ObjectMember::Element(e) = &member {
+            let element_span = pkl_syntax::cst::significant_span(e.syntax());
+            if element_span.end <= offset {
+                if let Some(surface) = e
+                    .expr()
+                    .as_ref()
+                    .and_then(|expr| new_expr_surface(doc, expr))
+                {
+                    prior_elements.push((element_span.end, surface));
+                }
+            }
+        }
+    }
+    prior_elements.sort_by(|(a, _), (b, _)| b.cmp(a));
+    surfaces.extend(prior_elements.into_iter().map(|(_, surface)| surface));
+    if let Some(expected) = expected {
+        surfaces.extend(element_surfaces_from_expected(expected));
+    }
+    if constructor_prefix_active(doc, offset) {
+        surfaces.extend(imported_class_surfaces(doc, graph, uri));
+    }
+    if !surfaces.is_empty()
+        && best
+            .as_ref()
+            .map(|(start, _)| span.start >= *start)
+            .unwrap_or(true)
+    {
+        *best = Some((span.start, surfaces));
+    }
+
+    for member in body.members() {
+        match member {
+            ObjectMember::Property(p) => {
+                let declared = p.ty().as_ref().map(|ty| body_surface_from_type(doc, ty));
+                let name = p
+                    .name()
+                    .map(|t| pkl_syntax::cst::ident_text(&t))
+                    .unwrap_or_default();
+                let member_surface = declared.or_else(|| {
+                    expected.and_then(|surface| {
+                        expected_member_surface(doc, graph, uri, surface, &name)
+                    })
+                });
+                collect_property_value_constructor_surfaces(
+                    doc,
+                    graph,
+                    uri,
+                    p.value(),
+                    member_surface.as_ref(),
+                    offset,
+                    best,
+                );
+            }
+            ObjectMember::Element(e) => {
+                if let Some(expr) = e.expr() {
+                    collect_expr_constructor_surfaces(doc, graph, uri, &expr, None, offset, best);
+                }
+            }
+            ObjectMember::Entry(e) => match e.value() {
+                Some(PropertyValue::ObjectBody(body)) => collect_object_body_constructor_surfaces(
+                    doc, graph, uri, &body, None, offset, best,
+                ),
+                Some(PropertyValue::Expr(expr)) => {
+                    collect_expr_constructor_surfaces(doc, graph, uri, &expr, None, offset, best)
+                }
+                None => {}
+            },
+            ObjectMember::When(w) => {
+                if let Some(then_body) = w.then_body() {
+                    collect_object_body_constructor_surfaces(
+                        doc, graph, uri, &then_body, expected, offset, best,
+                    );
+                }
+                if let Some(else_body) = w.else_body() {
+                    collect_object_body_constructor_surfaces(
+                        doc, graph, uri, &else_body, expected, offset, best,
+                    );
+                }
+            }
+            ObjectMember::For(f) => {
+                if let Some(body) = f.body() {
+                    collect_object_body_constructor_surfaces(
+                        doc, graph, uri, &body, expected, offset, best,
+                    );
+                }
+            }
+            ObjectMember::Method(m) => {
+                if let Some(expr) = m.body() {
+                    collect_expr_constructor_surfaces(doc, graph, uri, &expr, None, offset, best);
+                }
+            }
+            ObjectMember::Spread(s) => {
+                if let Some(expr) = s.expr() {
+                    collect_expr_constructor_surfaces(doc, graph, uri, &expr, None, offset, best);
+                }
+            }
+        }
+    }
+}
+
+fn collect_expr_constructor_surfaces(
+    doc: &Document,
+    graph: &ModuleGraph,
+    uri: &Url,
+    expr: &Expr,
+    expected: Option<&BodySurface>,
+    offset: u32,
+    best: &mut Option<(u32, Vec<BodySurface>)>,
+) {
+    let span = pkl_syntax::cst::significant_span(expr.syntax());
+    if !span.contains(offset) {
+        return;
+    }
+    match expr {
+        Expr::New(n) => {
+            let new_surface = n
+                .ty()
+                .as_ref()
+                .map(|ty| body_surface_from_type(doc, ty))
+                .or_else(|| expected.cloned());
+            if let Some(body) = n.body() {
+                collect_object_body_constructor_surfaces(
+                    doc,
+                    graph,
+                    uri,
+                    &body,
+                    new_surface.as_ref(),
+                    offset,
+                    best,
+                );
+            }
+        }
+        Expr::Amends(a) => {
+            if let Some(body) = a.body() {
+                collect_object_body_constructor_surfaces(
+                    doc, graph, uri, &body, expected, offset, best,
+                );
+            }
+        }
+        Expr::Paren(p) => {
+            if let Some(inner) = p.inner() {
+                collect_expr_constructor_surfaces(doc, graph, uri, &inner, expected, offset, best);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn new_expr_surface(doc: &Document, expr: &Expr) -> Option<BodySurface> {
+    let Expr::New(n) = expr else {
+        return None;
+    };
+    n.ty().as_ref().map(|ty| body_surface_from_type(doc, ty))
+}
+
+fn element_surfaces_from_expected(surface: &BodySurface) -> Vec<BodySurface> {
+    match surface {
+        BodySurface::Local(Ty::List(inner))
+        | BodySurface::Local(Ty::Listing(inner))
+        | BodySurface::Local(Ty::Set(inner)) => vec![BodySurface::Local((**inner).clone())],
+        _ => Vec::new(),
+    }
+}
+
+fn imported_class_surfaces(doc: &Document, graph: &ModuleGraph, uri: &Url) -> Vec<BodySurface> {
+    let module_uri = crate::uri::url_to_module_uri(uri);
+    let mut surfaces = Vec::new();
+    for import in doc.analysis.resolution.imports.values() {
+        if import.is_glob {
+            continue;
+        }
+        let Some(imported) = graph.imported_module(&module_uri, &import.local_name) else {
+            continue;
+        };
+        for sym in imported.analysis.resolution.symbols.iter() {
+            if sym.origin.is_stdlib()
+                || sym.container.is_some()
+                || !matches!(sym.kind, SymbolKind::Class)
+            {
+                continue;
+            }
+            surfaces.push(BodySurface::ImportedClass {
+                alias: import.local_name.clone(),
+                class_name: sym.name.clone(),
+            });
+        }
+    }
+    surfaces
+}
+
+fn constructor_prefix_active(doc: &Document, offset: u32) -> bool {
+    let text = doc.rope.to_string();
+    let prefix = current_prefix_text(&text, offset as usize);
+    prefix.is_empty() || "new".starts_with(prefix)
+}
+
+fn constructor_prefix_intent(doc: &Document, offset: u32) -> bool {
+    let text = doc.rope.to_string();
+    let prefix = current_prefix_text(&text, offset as usize);
+    !prefix.is_empty() && "new".starts_with(prefix)
+}
+
+fn current_prefix_text(text: &str, offset: usize) -> &str {
+    let bytes = text.as_bytes();
+    let mut start = offset;
+    while start > 0 {
+        let b = bytes[start - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    &text[start..offset]
+}
+
+fn current_prefix_replace_range(doc: &Document, offset: u32) -> Range {
+    let text = doc.rope.to_string();
+    let prefix = current_prefix_text(&text, offset as usize);
+    let start = offset as usize - prefix.len();
+    Range {
+        start: crate::document::byte_to_position(&doc.rope, start),
+        end: crate::document::byte_to_position(&doc.rope, offset as usize),
+    }
 }
 
 // ----------------------------------------------------------------------

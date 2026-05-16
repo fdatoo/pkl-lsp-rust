@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use pkl_analyze::FsLoaderConfig;
 use serde::Deserialize;
+use tower_lsp::lsp_types::{Documentation, MarkupContent, MarkupKind};
 
 const NAMESPACES_ENV: &str = "PKL_LSP_NAMESPACES";
 const MODULE_PATHS_ENV: &str = "PKL_LSP_MODULE_PATHS";
@@ -27,6 +28,57 @@ pub struct InitOptions {
     /// the placeholder for the saved document path.
     #[serde(default, rename = "evalCommand")]
     pub eval_command: Vec<String>,
+    /// Field-keyed literal value completions. For example, values under
+    /// `entity` are offered inside `entity = "..."`.
+    #[serde(default)]
+    pub completion: CompletionConfig,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct CompletionConfig {
+    #[serde(default)]
+    pub values: HashMap<String, Vec<ValueCompletion>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ValueCompletion {
+    Label(String),
+    Item {
+        label: String,
+        #[serde(default)]
+        detail: Option<String>,
+        #[serde(default)]
+        documentation: Option<String>,
+    },
+}
+
+impl ValueCompletion {
+    pub fn label(&self) -> &str {
+        match self {
+            ValueCompletion::Label(label) => label,
+            ValueCompletion::Item { label, .. } => label,
+        }
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            ValueCompletion::Label(_) => None,
+            ValueCompletion::Item { detail, .. } => detail.as_deref(),
+        }
+    }
+
+    pub fn documentation(&self) -> Option<Documentation> {
+        match self {
+            ValueCompletion::Label(_) => None,
+            ValueCompletion::Item { documentation, .. } => documentation.as_ref().map(|value| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: value.clone(),
+                })
+            }),
+        }
+    }
 }
 
 impl InitOptions {
@@ -126,6 +178,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_field_value_completions_from_init_options() {
+        let value = Some(json!({
+            "completion": {
+                "values": {
+                    "entity": [
+                        "light.kitchen",
+                        {
+                            "label": "light.cabinets",
+                            "detail": "Cabinets Left",
+                            "documentation": "A configured Home Assistant entity."
+                        }
+                    ]
+                }
+            }
+        }));
+        let opts = InitOptions::parse(value);
+        let values = opts.completion.values.get("entity").unwrap();
+        assert_eq!(values[0].label(), "light.kitchen");
+        assert_eq!(values[1].label(), "light.cabinets");
+        assert_eq!(values[1].detail(), Some("Cabinets Left"));
+    }
+
+    #[test]
     fn missing_init_options_yields_empty() {
         let opts = InitOptions::parse(None);
         assert!(opts.namespaces.is_empty());
@@ -142,6 +217,7 @@ mod tests {
             module_paths: Vec::new(),
             package_cache: None,
             eval_command: Vec::new(),
+            completion: CompletionConfig::default(),
         };
         let cfg = opts.into_loader_config();
         assert_eq!(cfg.namespaces["envns"], PathBuf::from("/tmp/env"));

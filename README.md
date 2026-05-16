@@ -154,6 +154,29 @@ diagnostics.
 }
 ```
 
+### Field value completions
+
+The server can offer configured string-literal values for specific fields.
+This is useful for project-specific identifiers such as Home Assistant
+entity IDs:
+
+```json
+{
+  "completion": {
+    "values": {
+      "entity": [
+        "light.kitchen",
+        { "label": "light.cabinets_left", "detail": "Cabinets Left" }
+      ],
+      "area": ["kitchen", "living_room"]
+    }
+  }
+}
+```
+
+Values under a key are only offered inside that field's string value, for
+example `entity = "..."`.
+
 ## Known limitations
 
 This is a v1 language server, not a full reimplementation of the Pkl

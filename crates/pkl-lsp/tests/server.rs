@@ -963,6 +963,596 @@ async fn completion_inside_imported_new_object_body_lists_imported_class_members
 }
 
 #[tokio::test]
+async fn completion_in_listing_suggests_constructor_from_sibling_element() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(
+        ns_dir.path().join("automations.pkl"),
+        "class EventTrigger {\n  kind: String\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:automations\" as auto\ntriggers = new {\n  new auto.EventTrigger { kind = \"noop.cue\" }\n  new\n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 3, "character": 5}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let item = items
+        .iter()
+        .find(|i| i["label"] == "new auto.EventTrigger")
+        .unwrap_or_else(|| panic!("expected contextual constructor, got {:?}", items));
+    assert_eq!(item["kind"], 15); // 15 = Snippet in LSP.
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 2);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 5);
+    assert!(item["textEdit"]["newText"]
+        .as_str()
+        .unwrap()
+        .starts_with("new auto.EventTrigger"));
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_in_listing_suggests_constructor_from_imported_class() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(
+        ns_dir.path().join("automations.pkl"),
+        "class EventTrigger {\n  kind: String\n}\nclass Action {\n  name: String\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:automations\" as auto\ntriggers = new {\n  new\n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 2, "character": 5}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"new auto.EventTrigger"),
+        "expected imported constructor completion, got {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"new auto.Action"),
+        "expected all imported classes, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"new"),
+        "expected contextual constructors instead of keyword fallback, got {:?}",
+        labels
+    );
+    let item = items
+        .iter()
+        .find(|i| i["label"] == "new auto.EventTrigger")
+        .unwrap();
+    assert_eq!(item["sortText"], "0000_constructor_0000_auto.EventTrigger");
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 2);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 5);
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_after_new_in_typed_listing_prefers_constructors() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(
+        ns_dir.path().join("automations.pkl"),
+        "class Automation {\n  triggers: Listing<EventTrigger>\n}\nclass EventTrigger {\n  kind: String\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:automations\" as auto\nautomation = new auto.Automation {\n  triggers = new {\n    new\n  }\n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 3, "character": 7}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        labels.contains(&"new auto.EventTrigger"),
+        "expected imported constructor completion, got {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"any"),
+        "expected constructors to beat collection members after `new`, got {:?}",
+        labels
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_after_new_in_listing_ranks_last_used_type_first() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(
+        ns_dir.path().join("automations.pkl"),
+        "class EventTrigger {\n  kind: String\n}\nclass CallServiceAction {\n  entity: String\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:automations\" as auto\nactions = new {\n  new auto.EventTrigger { kind = \"noop.cue\" }\n  new auto.CallServiceAction { entity = \"light\" }\n  new\n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 4, "character": 5}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    assert_eq!(items[0]["label"], "new auto.CallServiceAction");
+    assert_eq!(
+        items[0]["sortText"],
+        "0000_constructor_0000_auto.CallServiceAction"
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_string_literal_returns_no_items() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+    open_doc(
+        &mut writer,
+        &mut client_from_server,
+        "file:///tmp/string-completion.pkl",
+        "class EventTrigger {\n  kind: String\n}\ntrigger = new EventTrigger {\n  kind = \"no\"\n}\n",
+    )
+    .await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/string-completion.pkl"},
+                "position": {"line": 4, "character": 12}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    assert!(
+        items.is_empty(),
+        "expected no string completions, got {:?}",
+        items
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_configured_field_string_lists_values() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "completion": {
+                        "values": {
+                            "entity": [
+                                "light.kitchen",
+                                {
+                                    "label": "light.cabinets",
+                                    "detail": "Cabinets Left"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(
+        &mut writer,
+        &mut client_from_server,
+        "file:///tmp/entity-completion.pkl",
+        "action = new {\n  entity = \"li\"\n  name = \"li\"\n}\n",
+    )
+    .await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/entity-completion.pkl"},
+                "position": {"line": 1, "character": 14}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["light.kitchen", "light.cabinets"]);
+    assert_eq!(items[1]["detail"], "Cabinets Left");
+    assert_eq!(items[0]["textEdit"]["range"]["start"]["character"], 12);
+    assert_eq!(items[0]["textEdit"]["range"]["end"]["character"], 14);
+    assert_eq!(items[0]["textEdit"]["newText"], "light.kitchen");
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/entity-completion.pkl"},
+                "position": {"line": 2, "character": 12}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    assert!(
+        items.is_empty(),
+        "expected field-keyed values only for matching field, got {:?}",
+        items
+    );
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn completion_inside_object_body_omits_declared_members() {
+    use tempfile::tempdir;
+
+    let ns_dir = tempdir().unwrap();
+    std::fs::write(
+        ns_dir.path().join("automations.pkl"),
+        "class CallServiceAction {\n  entity: String\n  capability: String\n  args: String\n}\n",
+    )
+    .unwrap();
+
+    let main_dir = tempdir().unwrap();
+    let main_path = main_dir.path().join("main.pkl");
+    let main_src = "import \"switchyard:automations\" as auto\naction = new auto.CallServiceAction {\n  entity = \"light\"\n  \n}\n";
+    std::fs::write(&main_path, main_src).unwrap();
+    let main_uri = format!("file://{}", main_path.display());
+
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": {
+                    "namespaces": {
+                        "switchyard": ns_dir.path().to_string_lossy()
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let _ = read_message(&mut client_from_server).await;
+    send(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await;
+    open_doc(&mut writer, &mut client_from_server, &main_uri, main_src).await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": main_uri},
+                "position": {"line": 3, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let labels: Vec<&str> = items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(
+        !labels.contains(&"entity"),
+        "expected declared member to be omitted, got {:?}",
+        labels
+    );
+    assert!(labels.contains(&"capability"));
+    assert!(labels.contains(&"args"));
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
+async fn keyword_completion_items_include_snippets_and_details() {
+    let (client_to_server, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, mut client_from_server) = tokio::io::duplex(64 * 1024);
+    let (service, socket) = LspService::new(Backend::new);
+    let server_handle = tokio::spawn(Server::new(server_in, server_out, socket).serve(service));
+    let mut writer = client_to_server;
+
+    init_default(&mut writer, &mut client_from_server).await;
+    open_doc(
+        &mut writer,
+        &mut client_from_server,
+        "file:///tmp/keywords.pkl",
+        "cl\n",
+    )
+    .await;
+
+    send(
+        &mut writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/keywords.pkl"},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let resp = read_message(&mut client_from_server).await;
+    let items = resp["result"].as_array().expect("array result");
+    let class_item = items
+        .iter()
+        .find(|i| i["label"] == "class")
+        .unwrap_or_else(|| panic!("expected class keyword, got {:?}", items));
+    assert_eq!(class_item["kind"], 14); // 14 = Keyword in LSP.
+    assert_eq!(class_item["insertTextFormat"], 2); // 2 = Snippet.
+    assert!(class_item["detail"].as_str().unwrap().contains("Declare"));
+
+    shutdown(&mut writer, &mut client_from_server).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+}
+
+#[tokio::test]
 async fn completion_inside_namespace_import_lists_namespace_files() {
     use tempfile::tempdir;
 

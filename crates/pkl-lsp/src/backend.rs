@@ -16,7 +16,7 @@ use pkl_syntax::Severity;
 use crate::capabilities::server_capabilities;
 use crate::code_actions::code_actions_at;
 use crate::completion::complete_at;
-use crate::config::InitOptions;
+use crate::config::{CompletionConfig, InitOptions};
 use crate::document::Document;
 use crate::folding::folding_ranges;
 use crate::formatting::format_document;
@@ -56,6 +56,7 @@ pub struct Backend {
     /// Loader-facing configuration retained for editor features that need
     /// to suggest import paths before the graph has loaded a target.
     pub loader_config: Arc<RwLock<FsLoaderConfig>>,
+    pub completion_config: Arc<RwLock<CompletionConfig>>,
     pub eval_command: Arc<RwLock<Vec<String>>>,
     /// Set after `initialize` when the client advertises
     /// `window.workDoneProgress`. Servers must not create progress
@@ -72,6 +73,7 @@ impl Backend {
             graph: Arc::new(RwLock::new(ModuleGraph::new(loader))),
             workspace_index: Arc::new(RwLock::new(WorkspaceIndex::empty())),
             loader_config: Arc::new(RwLock::new(FsLoaderConfig::default())),
+            completion_config: Arc::new(RwLock::new(CompletionConfig::default())),
             eval_command: Arc::new(RwLock::new(Vec::new())),
             supports_work_done_progress: std::sync::atomic::AtomicBool::new(false),
         }
@@ -326,9 +328,11 @@ impl LanguageServer for Backend {
 
         let opts = InitOptions::parse(params.initialization_options);
         let eval_command = opts.eval_command.clone();
+        let completion_config = opts.completion.clone();
         let cfg = opts.into_loader_config();
         let loader = FsLoader::with_stdlib(cfg.clone());
         *self.loader_config.write().await = cfg;
+        *self.completion_config.write().await = completion_config;
         *self.eval_command.write().await = eval_command;
         self.graph.write().await.set_loader(loader);
 
@@ -641,11 +645,13 @@ impl LanguageServer for Backend {
         let graph = self.graph.read().await;
         let workspace_index = self.workspace_index.read().await;
         let loader_config = self.loader_config.read().await;
+        let completion_config = self.completion_config.read().await;
         Ok(complete_at(
             &doc,
             &graph,
             &workspace_index,
             &loader_config,
+            &completion_config,
             &uri,
             position,
         ))
